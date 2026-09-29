@@ -1,0 +1,54 @@
+name: stock-lab
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: stocklab
+      POSTGRES_USER: stocklab
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run setup.sh first}
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U stocklab -d stocklab]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+    mem_limit: 1g
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DATABASE_URL: postgresql+psycopg://stocklab:${POSTGRES_PASSWORD}@db:5432/stocklab
+    ports:
+      - "${APP_HOST:-127.0.0.1}:8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 2g
+    stop_grace_period: 120s
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+volumes:
+  database:

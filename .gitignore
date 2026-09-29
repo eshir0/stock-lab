@@ -1,0 +1,12 @@
+# 비밀값·데이터 — 절대 커밋하지 않음
+.env
+*.env
+!.env.example
+backups/
+*.dump
+*.db
+*.db-*
+# Python
+__pycache__/
+.pytest_cache/
+*.pyc
