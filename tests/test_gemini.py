@@ -26,7 +26,7 @@ def agent(tmp_path):
     config = Config(database_url='sqlite:///'+str(tmp_path/'gemini.db'), mode='toss',
                     password='test-password-123456', session_secret='test-session-secret-1234567890123456',
                     toss_id='test-toss-client', toss_secret='test-toss-secret',
-                    gemini_key='test-gemini-key', model='gemini-2.5-flash', ai_daily_calls=30)
+                    gemini_key='test-gemini-key', model='gemini-2.5-flash', ai_daily_calls=30, providers='gemini')
     store = Store(config.database_url, config.mode)
     with store.edit() as state:
         state.update(running=True, generation=1)
@@ -280,7 +280,7 @@ def test_start_rejects_invalid_model_without_starting_or_calls(tmp_path, model):
     config = Config(database_url='sqlite:///'+str(tmp_path/'api.db'), mode='toss',
                     password='test-password-123456', session_secret='test-session-secret-1234567890123456',
                     toss_id='test-toss-client', toss_secret='test-toss-secret',
-                    gemini_key='test-gemini-key', model=model)
+                    gemini_key='test-gemini-key', model=model, providers='gemini')
     app = create_app(config, background=False, test=True)
     headers = {'X-Stocklab-Action': '1'}
     with TestClient(app) as client:

@@ -234,10 +234,14 @@ def create_app(config=None, background=True, test=False):
         if c.mode == 'toss':
             if not (c.toss_id and c.toss_secret):
                 raise RuleError('실제 시세 모드에는 토스 설정이 필요합니다.')
-            try:
-                c.validate_ai()
-            except ValueError as exc:
-                raise RuleError(str(exc)) from None
+            if not c.ai_configured:
+                # Say what is wrong with Gemini when it is the provider the owner asked for; otherwise point at the bridge.
+                if 'gemini' in [name.strip().lower() for name in c.providers.split(',')]:
+                    try:
+                        c.validate_ai()
+                    except ValueError as exc:
+                        raise RuleError(str(exc)) from None
+                raise RuleError('사용할 수 있는 AI가 없습니다. 서버 .env의 AI_BRIDGE_URL·AI_BRIDGE_TOKEN(Claude/Codex)을 확인하세요.')
         engine.start()
         return {'ok': True}
 

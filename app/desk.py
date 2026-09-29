@@ -268,6 +268,8 @@ class DeskMixin:
         if not candidates:
             self.wait_for_cycle(gen, message)
             return
+        if not self.begin_ai_cycle(gen):
+            return
         selection = None
         requested = snapshot.get('requested_symbol')
         chosen = next((c for c in candidates if c[0] == requested), None)

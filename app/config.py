@@ -33,7 +33,9 @@ class Config:
     # Host CLI bridge (claude -p / codex exec); Gemini is only the last fallback.
     bridge_url: str = os.getenv('AI_BRIDGE_URL', '')
     bridge_token: str = os.getenv('AI_BRIDGE_TOKEN', '')
-    providers: str = os.getenv('AI_PROVIDERS', 'claude,codex,gemini')
+    providers: str = os.getenv('AI_PROVIDERS', 'claude,codex')
+    # Percent of a subscription window (5-hour or weekly) at which a NEW analysis cycle moves to the next AI.
+    ai_switch_pct: float = max(10.0, min(99.0, float(os.getenv('AI_SWITCH_AT_PCT', '80'))))
     # Live-trading readiness: locked in this build; the environment can request it but never enable it.
     live: LiveConfig = field(default_factory=LiveConfig.from_env)
     ai_daily_calls: int = int(os.getenv('AI_DAILY_CALL_LIMIT', '30'))

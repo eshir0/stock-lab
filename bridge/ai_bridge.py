@@ -26,7 +26,9 @@ CODEX_TIMEOUT = {True: 280, False: 170}
 EXHAUSTED_COOLDOWN = 1800
 LIMIT_WORDS = ('usage limit', 'rate limit', 'limit reached', 'hit your limit', 'quota', 'resets')
 
+STATE_FILE = os.getenv('STOCKLAB_BRIDGE_STATE', '/opt/stock-lab/bridge-state.json')
 _cooldown = {}
+_usage = {}             # provider -> last usage reading {'at', 'status', 'type', 'windows': {name: {'utilization', 'resets_at'}}}
 _cooldown_lock = threading.Lock()
 _slots = {'claude': threading.BoundedSemaphore(3), 'codex': threading.BoundedSemaphore(3)}
 
@@ -45,9 +47,10 @@ def load_env(path=ENV_FILE):
 
 
 class Exhausted(Exception):
-    def __init__(self, message, until=None):
+    def __init__(self, message, until=None, limits=None):
         super().__init__(message)
         self.until = until or time.time()+EXHAUSTED_COOLDOWN
+        self.limits = limits
 
 
 def cooling(provider):
@@ -59,6 +62,46 @@ def cooling(provider):
 def set_cooldown(provider, until):
     with _cooldown_lock:
         _cooldown[provider] = max(until, time.time()+60)
+    save_state()
+
+
+def save_state():
+    """Keep cooldowns and the last usage readings across a restart, so restarting never hides an exhausted provider."""
+    with _cooldown_lock:
+        payload = json.dumps({'cooldown': dict(_cooldown), 'usage': _usage})
+    try:
+        tmp = STATE_FILE+'.tmp'
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(payload)
+        os.replace(tmp, STATE_FILE)
+    except OSError:
+        pass                         # a missing or read-only state file only loses persistence, never a request
+
+
+def load_state():
+    try:
+        with open(STATE_FILE, encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return
+    now = time.time()
+    with _cooldown_lock:
+        for provider, until in (data.get('cooldown') or {}).items() if isinstance(data, dict) else []:
+            if provider in RUNNERS and isinstance(until, (int, float)) and until > now:
+                _cooldown[provider] = until
+        for provider, entry in (data.get('usage') or {}).items() if isinstance(data, dict) else []:
+            if provider in RUNNERS and isinstance(entry, dict):
+                _usage[provider] = entry
+
+
+def note_limits(provider, limits):
+    """Remember the newest usage reading of a provider (Claude reports it on every call)."""
+    if not isinstance(limits, dict) or not limits.get('windows'):
+        return
+    with _cooldown_lock:
+        _usage[provider] = dict(limits, at=time.time())
+    save_state()
 
 
 def looks_exhausted(message):
@@ -101,8 +144,24 @@ def search_links(content):
     return links
 
 
+def claude_limits(info):
+    """Normalise a rate_limit_event: {'status', 'type', 'windows': {'five_hour': {'utilization': 0..1, 'resets_at': epoch}}}."""
+    windows = {}
+    raw = info.get('unifiedWindows') if isinstance(info, dict) else None
+    for name, window in (raw.items() if isinstance(raw, dict) else []):
+        value = window.get('utilization') if isinstance(window, dict) else None
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        if 1 < value <= 100:            # a percentage rather than a fraction
+            value = value/100
+        reset = window.get('resetsAt')
+        windows[str(name)[:24]] = {'utilization': max(0.0, min(1.0, float(value))),
+                                   'resets_at': reset if isinstance(reset, (int, float)) and not isinstance(reset, bool) else None}
+    return {'status': str(info.get('status') or '')[:24], 'type': str(info.get('rateLimitType') or '')[:24], 'windows': windows}
+
+
 def parse_claude(lines):
-    search_ids, sources, result, usage, model = set(), [], None, {}, ''
+    search_ids, sources, result, usage, model, limits = set(), [], None, {}, '', None
     for line in lines:
         try:
             event = json.loads(line)
@@ -111,8 +170,9 @@ def parse_claude(lines):
         kind = event.get('type')
         if kind == 'rate_limit_event':
             info = event.get('rate_limit_info') or {}
+            limits = claude_limits(info)
             if info.get('status') == 'rejected':
-                raise Exhausted('Claude 사용량 소진', info.get('resetsAt'))
+                raise Exhausted('Claude 사용량 소진', info.get('resetsAt'), limits=limits)
         elif kind == 'assistant':
             message = event.get('message') or {}
             model = message.get('model') or model
@@ -137,7 +197,7 @@ def parse_claude(lines):
     if not isinstance(data, dict):
         raise RuntimeError('Claude가 구조화 응답을 반환하지 않았습니다.')
     total = sum(v for k, v in usage.items() if k.endswith('_tokens') and type(v) is int)
-    return {'data': data, 'sources': sources, 'usage': {'total_tokens': total}, 'model': model or 'claude'}
+    return {'data': data, 'sources': sources, 'usage': {'total_tokens': total}, 'model': model or 'claude', 'limits': limits}
 
 
 def run_claude(env, system, prompt, schema, search):
@@ -302,8 +362,10 @@ def generate(request):
         return 200, {'ok': False, 'exhausted': False, 'message': provider+' 동시 실행 대기 초과'}
     try:
         result = RUNNERS[provider](load_env(), system, prompt, schema, bool(request.get('search')))
+        note_limits(provider, result.get('limits'))
         return 200, dict(result, ok=True)
     except Exhausted as exc:
+        note_limits(provider, exc.limits)
         set_cooldown(provider, exc.until)
         return 200, {'ok': False, 'exhausted': True, 'until': exc.until, 'message': str(exc)}
     except subprocess.TimeoutExpired:
@@ -325,16 +387,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _authorized(self):
+        token = load_env().get('AI_BRIDGE_TOKEN', '')
+        supplied = self.headers.get('Authorization', '').removeprefix('Bearer ')
+        # Compare bytes: a non-ASCII header must be a plain "no", not an exception.
+        return len(token) >= 32 and secrets.compare_digest(supplied.encode('utf-8', 'replace'), token.encode())
+
     def do_GET(self):
         if self.path == '/health':
             self._send(200, {'ok': True, 'cooldown': {p: cooling(p) for p in RUNNERS}})
+        elif self.path == '/usage':
+            if not self._authorized():
+                return self._send(401, {'ok': False, 'message': 'unauthorized'})
+            with _cooldown_lock:
+                readings = json.loads(json.dumps(_usage))
+            self._send(200, {'ok': True, 'now': time.time(),
+                             'providers': {p: {'cooldown_until': cooling(p) or None, 'limits': readings.get(p)} for p in RUNNERS}})
         else:
             self._send(404, {'ok': False})
 
     def do_POST(self):
-        token = load_env().get('AI_BRIDGE_TOKEN', '')
-        supplied = self.headers.get('Authorization', '').removeprefix('Bearer ')
-        if len(token) < 32 or not secrets.compare_digest(supplied, token):
+        if not self._authorized():
             return self._send(401, {'ok': False, 'message': 'unauthorized'})
         if self.path != '/generate':
             return self._send(404, {'ok': False})
@@ -352,6 +425,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
+    load_state()
     host, _, port = load_env().get('AI_BRIDGE_BIND', '172.17.0.1:8765').rpartition(':')
     server = http.server.ThreadingHTTPServer((host, int(port)), Handler)
     print('stocklab ai bridge listening on %s:%s' % (host, port), flush=True)

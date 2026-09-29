@@ -3,6 +3,8 @@
 *.env
 !.env.example
 backups/
+bridge-state.json
+bridge-state.json.tmp
 *.dump
 *.db
 *.db-*

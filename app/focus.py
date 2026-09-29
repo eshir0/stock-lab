@@ -92,6 +92,8 @@ class FocusMixin:
         """Only while the analysis is running, and never at the cost of the desk's own daily AI budget."""
         if not self.c.focus_ai or not state.get('running'):
             return False
+        if self.agents.gate.enabled and not self.agents.gate.plan()[0]:
+            return False                   # every AI is exhausted or past the switch level: the briefing can wait
         if self.c.mode == 'demo':
             return True
         if not self.c.ai_configured:

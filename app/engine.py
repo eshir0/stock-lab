@@ -21,6 +21,7 @@ from .risk import normalize_settings, RiskError
 from .providers import DemoProvider, ProviderError, RateLimited, TossProvider
 from .performance import performance_summary, record_performance
 from .store import event
+from .usage import LABELS as PROVIDER_LABELS
 
 
 class RuleError(ValueError):
@@ -44,6 +45,7 @@ class Engine(DeskMixin, FocusMixin):
     def __init__(self, config, store, provider=None):
         self.c, self.store = config, store
         self.focus_attempts = {}   # market -> (time of the last build attempt, consecutive failures, session date)
+        self.active_provider = None
         self.provider = provider or (DemoProvider() if config.mode == 'demo' else TossProvider(config))
         self.agents = Agents(config, store)
         self.intel = MarketIntel()
@@ -428,6 +430,34 @@ class Engine(DeskMixin, FocusMixin):
                 s['scheduler_status'] = message
                 s['next_run'] = next_run if next_run is not None else time.time()+30
 
+    def begin_ai_cycle(self, gen):
+        """Choose this cycle's AI providers BEFORE anything is spent: skip the ones that are exhausted or past the
+        switch level (see usage.py). False means none is usable right now, so the cycle waits quietly, a minute at a
+        time, until the earliest reset instead of starting and failing halfway."""
+        gate = self.agents.gate
+        usable, statuses, message = gate.plan()
+        if not gate.enabled or not self.c.provider_order:
+            self.agents.cycle_order = None
+            return True
+        if not usable:
+            self.agents.cycle_order = None
+            self.wait_for_cycle(gen, message, time.time()+60)
+            return False
+        self.agents.cycle_order = usable
+        if usable[0] != self.active_provider:
+            previous, self.active_provider = self.active_provider, usable[0]
+            order = list(self.c.provider_order)
+            # Only providers ranked ahead of the one in use were "skipped"; a later one being unusable is not news.
+            skipped = [s for s in statuses if s['state'] != 'ok' and order.index(s['name']) < order.index(usable[0])]
+            label = PROVIDER_LABELS.get(usable[0], usable[0])
+            if skipped:
+                with self.store.edit() as s:
+                    event(s, f'이번 분석은 {label}로 진행합니다. ' + ' · '.join(f'{x["label"]} {x["note"]}' for x in skipped), 'warning')
+            elif previous is not None and usable[0] == order[0]:
+                with self.store.edit() as s:
+                    event(s, f'{label}로 되돌아왔습니다. 사용량이 전환 기준 아래입니다.')
+        return True
+
     def cycle(self):
         if not self.busy.acquire(False):
             return
@@ -472,6 +502,8 @@ class Engine(DeskMixin, FocusMixin):
                     message = str(exc)
             if selected is None:
                 self.wait_for_cycle(gen, message)
+                return
+            if not self.begin_ai_cycle(gen):
                 return
             symbol, index, quote = selected
             with self.store.edit() as s:
@@ -555,6 +587,7 @@ class Engine(DeskMixin, FocusMixin):
                     run['status'], run['error'] = 'error', message
                     event(s, message, 'warning')
         finally:
+            self.agents.cycle_order = None
             self.busy.release()
 
     def public_state(self):
@@ -584,6 +617,7 @@ class Engine(DeskMixin, FocusMixin):
         s['trades_count'] = len(s['trades'])
         s['trades'] = s['trades'][-100:]
         s['server_time'] = time.time()
+        s['ai'] = self.agents.gate.summary()
         s['config'] = {'ai_configured': self.c.ai_configured,
                        'toss_configured': bool(self.c.toss_id and self.c.toss_secret),
                        'toss_rate': {group: dict(info) for group, info in (getattr(self.provider, 'rates', None) or {}).items()},

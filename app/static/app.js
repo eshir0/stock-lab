@@ -31,7 +31,7 @@ function setHtml(id, html) {
 function setRing(id, pct, label) {
   $(id).style.setProperty('--pct', String(Math.max(0, Math.min(100, pct))));
   $(id + '-pct').textContent = label;
-  $(id).setAttribute('aria-label', '오늘 AI 호출 사용량 ' + label);
+  $(id).setAttribute('aria-label', 'AI 사용량 ' + label);
 }
 function smoothPath(points, low = -Infinity, high = Infinity) {
   if (points.length < 2) return '';
@@ -303,11 +303,21 @@ function render() {
   renderPerformance(s,'KRW','kr');
   renderPerformance(s,'USD','us');
   const date = stamp(now)?.toISOString().slice(0,10);
-  $('ai-usage').textContent = sim ? '외부 호출 없음' : `${s.daily_ai[date] || 0} / ${s.config.daily_limit}`;
-  const calls = Math.max(1, s.config.analysis_calls_per_cycle || roleList(s).length), dailyLimit = s.config.daily_limit || 0, used = s.daily_ai[date] || 0;
-  const usedPct = dailyLimit ? Math.min(100, used / dailyLimit * 100) : 0;
-  setRing('ai-ring', sim ? 0 : usedPct, sim ? '—' : Math.round(usedPct) + '%');
-  $('ai-cycle-budget').textContent = sim ? `${calls}개 역할의 고정 응답으로 흐름을 확인합니다.` : `분석 1회 ${calls}호출 · 일 ${dailyLimit}호출로 완전 분석 최대 ${Math.floor(dailyLimit/calls)}회 · 남은 호출로 최대 ${Math.floor(Math.max(0,dailyLimit-used)/calls)}회`;
+  const ai = s.ai, calls = Math.max(1, s.config.analysis_calls_per_cycle || roleList(s).length), dailyLimit = s.config.daily_limit || 0, used = s.daily_ai[date] || 0;
+  if (!sim && ai?.enabled && ai.providers.length) {
+    const shown = ai.providers.find(p => p.name === ai.active) || ai.providers.slice().sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1))[0];
+    const pct = finite(shown.pct) ? shown.pct : null;
+    $('ai-usage').textContent = ai.active ? `${shown.label} ${pct === null ? '사용 가능' : Math.round(pct) + '%'}` : '대기 중';
+    setRing('ai-ring', pct ?? 0, pct === null ? '—' : Math.round(pct) + '%');
+    $('ai-cycle-budget').textContent = ai.providers.map(p => p.label + ' ' + (p.state === 'exhausted' ? p.note
+      : Object.keys(p.windows).length ? Object.entries(p.windows).map(([n, w]) => (({five_hour: '5시간', seven_day: '주간'})[n] || n) + ' ' + Math.round(w.pct) + '%').join(' · ') + (p.state === 'high' ? ' (전환 기준 초과)' : '')
+        : '사용량 확인 전')).join(' | ') + ` · ${Math.round(ai.switch_pct)}%에서 다음 AI로 전환`;
+  } else {
+    const usedPct = dailyLimit ? Math.min(100, used / dailyLimit * 100) : 0;
+    $('ai-usage').textContent = sim ? '외부 호출 없음' : `${used} / ${dailyLimit}`;
+    setRing('ai-ring', sim ? 0 : usedPct, sim ? '—' : Math.round(usedPct) + '%');
+    $('ai-cycle-budget').textContent = sim ? `${calls}개 역할의 고정 응답으로 흐름을 확인합니다.` : `분석 1회 ${calls}호출 · 일 ${dailyLimit}호출로 완전 분석 최대 ${Math.floor(dailyLimit/calls)}회 · 남은 호출로 최대 ${Math.floor(Math.max(0,dailyLimit-used)/calls)}회`;
+  }
   $('trade-count').textContent = `${s.trades_count}건 모의체결`;
   $('next-run').textContent = s.running ? `분석 간격 ${Math.round(s.config.interval/60)}분` : '현재 중지 상태';
   $('poll-label').textContent = `${s.config.poll}초 조회`;
@@ -531,11 +541,11 @@ function renderTeam(s) {
   }).join(''));
   $('sizing-summary').hidden = !run?.sizing;
   if (run?.sizing) setHtml('sizing-summary', `<div class="sizing-head"><h3>수량 산정</h3><span>최종 제안 <b>${quantity(run.sizing.quantity)}</b></span></div>${sizingDetails(run.sizing,s.instruments.find(i => i.symbol === run.symbol)?.currency)}<p class="muted small">목표·위험·매수 가능 수량 안에서 정수 주식으로 계산합니다. 손절 기준은 체결 가격을 보장하지 않습니다.</p>`);
-  const nextKey = JSON.stringify(run);
+  const runOld = !!run && s.server_time-run.time > 600, nextKey = JSON.stringify(run)+'|'+(runOld ? 'old' : 'new');
   if (reportKey !== nextKey) {
     const opened = new Set([...$('reports').querySelectorAll('details[open]')].map(d => d.dataset.role));
     reportKey = nextKey;
-    $('reports').innerHTML = (run?.reports || []).map(r => `<details data-role="${esc(r.role)}" ${opened.has(r.role) || r.role === 'director' || r.role === 'planner' || r.role === 'selector' ? 'open' : ''}><summary>${esc(r.name || names[r.role])} · ${r.role === 'selector' ? '선정 · ' + esc(r.symbol) : r.role === 'planner' ? '조사 브리핑' : esc(({BUY:'매수 의견',SELL:'매도 의견',HOLD:'관망 의견'})[r.stance] || '분석 보고서')}</summary><div class="report-body"><p>${esc(r.summary)}</p>${reportExtras(r)}<ul>${(r.risks || []).map(x => `<li>${esc(x)}</li>`).join('')}</ul>${(r.sources || []).filter(x => safeUrl(x.url)).map(x => `<a href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener noreferrer">${esc(x.title || x.url)} ↗</a>`).join('')}${searchEntryFrame(run,r)}<div class="report-model">${esc(r.engine)} · ${clock(r.time)}${r.usage?.total_tokens ? ' · ' + Number(r.usage.total_tokens).toLocaleString() + ' tokens' : ''}</div></div></details>`).join('') + (run?.error ? `<div class="notice error">${esc(run.error)}</div>` : '') + (run?.blocked ? `<div class="notice">${esc(run.blocked)}</div>` : '');
+    $('reports').innerHTML = (run?.reports || []).map(r => `<details data-role="${esc(r.role)}" ${opened.has(r.role) || r.role === 'director' || r.role === 'planner' || r.role === 'selector' ? 'open' : ''}><summary>${esc(r.name || names[r.role])} · ${r.role === 'selector' ? '선정 · ' + esc(r.symbol) : r.role === 'planner' ? '조사 브리핑' : esc(({BUY:'매수 의견',SELL:'매도 의견',HOLD:'관망 의견'})[r.stance] || '분석 보고서')}</summary><div class="report-body"><p>${esc(r.summary)}</p>${reportExtras(r)}<ul>${(r.risks || []).map(x => `<li>${esc(x)}</li>`).join('')}</ul>${(r.sources || []).filter(x => safeUrl(x.url)).map(x => `<a href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener noreferrer">${esc(x.title || x.url)} ↗</a>`).join('')}${searchEntryFrame(run,r)}<div class="report-model">${esc(r.engine)} · ${clock(r.time)}${r.usage?.total_tokens ? ' · ' + Number(r.usage.total_tokens).toLocaleString() + ' tokens' : ''}</div></div></details>`).join('') + (run?.error ? `<div class="notice error"><b>${runOld ? '지난 분석 실행의 오류 기록' : '이번 분석 오류'} · ${dateTime(run.time)}</b><br>${esc(run.error)}</div>` : '') + (run?.blocked ? `<div class="notice">${esc(run.blocked)}</div>` : '');
   }
 }
 function drawChart() {

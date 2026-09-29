@@ -8,6 +8,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'bridge'))
 import ai_bridge  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def isolated_state(tmp_path, monkeypatch):
+    """Cooldowns and readings are persisted; a test must never touch the real state file."""
+    monkeypatch.setattr(ai_bridge, 'STATE_FILE', str(tmp_path/'bridge-state.json'))
+    monkeypatch.setattr(ai_bridge, '_usage', {})
+    monkeypatch.setattr(ai_bridge, '_cooldown', {})
+
+
 def lines(*events):
     return [json.dumps(e, ensure_ascii=False) for e in events]
 
@@ -23,7 +31,8 @@ def test_claude_stream_collects_search_links_and_structured_output():
         {'type': 'result', 'subtype': 'success', 'is_error': False, 'structured_output': {'a': 1},
          'usage': {'input_tokens': 5, 'output_tokens': 7}}))
     assert out == {'data': {'a': 1}, 'sources': [{'url': 'https://news.example.com/1', 'title': '기사'}],
-                   'usage': {'total_tokens': 12}, 'model': 'claude-sonnet'}
+                   'usage': {'total_tokens': 12}, 'model': 'claude-sonnet',
+                   'limits': {'status': 'allowed', 'type': '', 'windows': {}}}
 
 
 def test_claude_rejected_rate_limit_is_exhaustion():
@@ -103,3 +112,122 @@ def test_claude_model_and_effort_are_passed():
     args = ai_bridge.claude_args('claude-opus-5-5', 'sys', {}, False, 'medium')
     assert args[args.index('--model')+1] == 'claude-opus-5-5' and args[args.index('--effort')+1] == 'medium'
     assert '--effort' not in ai_bridge.claude_args('sonnet', 'sys', {}, False, 'bogus')
+
+
+REAL_EVENT = {'type': 'rate_limit_event', 'rate_limit_info': {
+    'status': 'allowed', 'resetsAt': 1790739000, 'rateLimitType': 'five_hour', 'isUsingOverage': False,
+    'unifiedWindows': {'five_hour': {'utilization': 0.17, 'resetsAt': 1790739000},
+                       'seven_day': {'utilization': 0.02, 'resetsAt': 1791320400}}}}
+
+
+def success(*events):
+    return lines(*events, {'type': 'result', 'subtype': 'success', 'is_error': False, 'structured_output': {'a': 1}, 'usage': {}})
+
+
+def test_claude_reports_its_real_usage_windows_on_every_call():
+    out = ai_bridge.parse_claude(success(REAL_EVENT))
+    assert out['limits'] == {'status': 'allowed', 'type': 'five_hour', 'windows': {
+        'five_hour': {'utilization': 0.17, 'resets_at': 1790739000}, 'seven_day': {'utilization': 0.02, 'resets_at': 1791320400}}}
+
+
+def test_a_rejected_call_still_carries_the_usage_windows():
+    event = {'type': 'rate_limit_event', 'rate_limit_info': dict(REAL_EVENT['rate_limit_info'], status='rejected')}
+    with pytest.raises(ai_bridge.Exhausted) as exc:
+        ai_bridge.parse_claude(lines(event))
+    assert exc.value.limits['windows']['five_hour']['utilization'] == 0.17 and exc.value.limits['status'] == 'rejected'
+
+
+@pytest.mark.parametrize('raw,expected', [(0.5, 0.5), (85, 0.85), (1, 1.0), (250, 1.0), (-3, 0.0), (True, None), ('0.4', None), (None, None)])
+def test_utilization_is_normalised_to_a_fraction_and_junk_is_dropped(raw, expected):
+    info = {'unifiedWindows': {'five_hour': {'utilization': raw, 'resetsAt': 5}}}
+    windows = ai_bridge.claude_limits(info)['windows']
+    if expected is None:
+        assert windows == {}
+    else:
+        assert windows['five_hour']['utilization'] == expected
+
+
+def test_readings_and_cooldowns_survive_a_restart(monkeypatch):
+    limits = ai_bridge.claude_limits(REAL_EVENT['rate_limit_info'])
+    ai_bridge.note_limits('claude', limits)
+    ai_bridge.set_cooldown('codex', ai_bridge.time.time()+3600)
+    ai_bridge.set_cooldown('claude', ai_bridge.time.time()+0)                       # min 60 s: expires almost at once
+    monkeypatch.setattr(ai_bridge, '_usage', {})
+    monkeypatch.setattr(ai_bridge, '_cooldown', {'claude': 1.0})                     # stale entry from an earlier life
+    ai_bridge.load_state()
+    assert ai_bridge.cooling('codex') and ai_bridge._usage['claude']['windows']['five_hour']['utilization'] == 0.17
+
+
+def test_an_expired_cooldown_is_not_restored(monkeypatch):
+    ai_bridge.set_cooldown('codex', ai_bridge.time.time()+3600)
+    monkeypatch.setattr(ai_bridge, '_cooldown', {})
+    monkeypatch.setattr(ai_bridge.time, 'time', lambda t=ai_bridge.time.time: t()+7200)
+    ai_bridge.load_state()
+    assert not ai_bridge.cooling('codex')
+
+
+def test_a_missing_or_unwritable_state_file_never_breaks_a_request(monkeypatch, tmp_path):
+    monkeypatch.setattr(ai_bridge, 'STATE_FILE', str(tmp_path/'no-such-dir'/'state.json'))
+    ai_bridge.note_limits('claude', ai_bridge.claude_limits(REAL_EVENT['rate_limit_info']))
+    ai_bridge.set_cooldown('codex', ai_bridge.time.time()+600)
+    ai_bridge.load_state()
+    assert ai_bridge.cooling('codex')
+
+
+def test_generate_records_the_usage_reading_of_a_successful_call(monkeypatch):
+    limits = ai_bridge.claude_limits(REAL_EVENT['rate_limit_info'])
+    monkeypatch.setitem(ai_bridge.RUNNERS, 'claude', lambda *a: {'data': {}, 'sources': [], 'usage': {}, 'model': 'm', 'limits': limits})
+    monkeypatch.setattr(ai_bridge, 'load_env', lambda: {})
+    _, body = ai_bridge.generate({'provider': 'claude', 'system': 's', 'prompt': 'p', 'schema': {}})
+    assert body['ok'] and body['limits'] == limits and ai_bridge._usage['claude']['windows']['seven_day']['utilization'] == 0.02
+
+
+def test_exhaustion_keeps_the_last_reading_and_the_cooldown(monkeypatch):
+    limits = ai_bridge.claude_limits(dict(REAL_EVENT['rate_limit_info'], status='rejected'))
+    def exhausted(*args):
+        raise ai_bridge.Exhausted('Claude 사용량 소진', ai_bridge.time.time()+900, limits=limits)
+    monkeypatch.setitem(ai_bridge.RUNNERS, 'claude', exhausted)
+    monkeypatch.setattr(ai_bridge, 'load_env', lambda: {})
+    ai_bridge.generate({'provider': 'claude', 'system': 's', 'prompt': 'p', 'schema': {}})
+    assert ai_bridge.cooling('claude') and ai_bridge._usage['claude']['status'] == 'rejected'
+
+
+class FakeRequest(ai_bridge.Handler):
+    """The handler without a socket: enough to exercise authorization and the /usage route."""
+    def __init__(self, path, auth):
+        self.path, self.headers, self.sent = path, {'Authorization': auth}, None
+
+    def _send(self, status, payload):
+        self.sent = (status, payload)
+
+
+TOKEN = 't'*40
+
+
+@pytest.mark.parametrize('auth,ok', [('Bearer '+TOKEN, True), ('Bearer wrong', False), ('', False), ('Bearer é'+TOKEN, False), ('Bearer '+TOKEN[:-1], False)])
+def test_usage_route_requires_the_bridge_token(monkeypatch, auth, ok):
+    monkeypatch.setattr(ai_bridge, 'load_env', lambda: {'AI_BRIDGE_TOKEN': TOKEN})
+    ai_bridge.note_limits('claude', ai_bridge.claude_limits(REAL_EVENT['rate_limit_info']))
+    request = FakeRequest('/usage', auth)
+    request.do_GET()
+    status, payload = request.sent
+    assert (status == 200) is ok
+    if ok:
+        assert payload['providers']['claude']['limits']['windows']['five_hour']['utilization'] == 0.17
+        assert set(payload['providers']) == {'claude', 'codex'} and payload['providers']['codex']['cooldown_until'] is None
+    else:
+        assert status == 401 and 'providers' not in payload
+
+
+def test_a_non_ascii_authorization_header_is_refused_not_an_error(monkeypatch):
+    monkeypatch.setattr(ai_bridge, 'load_env', lambda: {'AI_BRIDGE_TOKEN': TOKEN})
+    request = FakeRequest('/generate', 'Bearer é')
+    request.headers['Content-Length'] = '2'
+    request.do_POST()
+    assert request.sent[0] == 401
+
+
+def test_health_stays_unauthenticated_and_shows_only_cooldowns():
+    request = FakeRequest('/health', '')
+    request.do_GET()
+    assert request.sent[0] == 200 and set(request.sent[1]) == {'ok', 'cooldown'}

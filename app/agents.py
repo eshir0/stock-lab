@@ -10,6 +10,7 @@ import httpx
 from .instruments import SYMBOLS
 from .providers import ProviderError
 from .store import event
+from .usage import UsageGate
 
 
 GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent'
@@ -431,6 +432,29 @@ def validate_report(report, role, context, sources, desk=False):
 class Agents:
     def __init__(self, config, store):
         self.c, self.store = config, store
+        self.gate = UsageGate(config, fetch=self.fetch_usage)
+        self.cycle_order = None      # providers chosen for the running cycle, best first
+
+    def fetch_usage(self):
+        """{provider: {...}} from the bridge's /usage, or None when it cannot be reached."""
+        if not self.c.bridge_configured:
+            return {}
+        try:
+            r = httpx.get(self.c.bridge_url.strip().rstrip('/')+'/usage', timeout=3,
+                          headers={'Authorization': 'Bearer '+self.c.bridge_token.strip()})
+            r.raise_for_status()
+            data = r.json()
+        except (httpx.HTTPError, ValueError):
+            return None
+        providers = data.get('providers') if isinstance(data, dict) else None
+        return providers if isinstance(providers, dict) else None
+
+    def order_now(self):
+        """The running cycle keeps the providers it started with; a lone call (the morning briefing) asks the gate."""
+        if self.cycle_order:
+            return list(self.cycle_order)
+        usable, _, _ = self.gate.plan()
+        return usable or list(self.c.provider_order)
 
     def reserve(self, generation):
         date = datetime.now(timezone.utc).date().isoformat()
@@ -498,6 +522,7 @@ class Agents:
                 if self.c.gemini_key.strip():
                     raise ProviderError(str(exc)) from None
             raise ProviderError('서버 .env에 AI_BRIDGE_URL·AI_BRIDGE_TOKEN(Claude/Codex) 또는 GEMINI_API_KEY를 설정하세요.')
+        order = self.order_now()
         role_prompt = (DESK_PROMPTS if desk else PROMPTS)[role]
         if desk and role not in ('selector', 'trend'):
             role_prompt += (' context.assignment가 있으면 해당 조사 과제를 수행하세요. '
@@ -548,6 +573,8 @@ class Agents:
         if not isinstance(data, dict) or not data.get('ok'):
             data = data if isinstance(data, dict) else {}
             state = '사용량 소진' if data.get('exhausted') else '실패'
+            if data.get('exhausted'):
+                self.gate.observe(provider, cooldown_until=data.get('until'))
             raise ProviderError(f'[{label} {state}] '+str(data.get('message') or '')[:300])
         sources = [{'url': x['url'], 'title': str(x.get('title') or x['url'])[:500]}
                    for x in data.get('sources') or [] if isinstance(x, dict) and _url(x.get('url'))]
@@ -557,6 +584,7 @@ class Agents:
             report = validate_report(raw, role, context, sources, desk=desk)
         except (ValueError, TypeError, KeyError):
             raise ProviderError(f'[{label} 응답 검증 실패] 형식·전략 수치·근거를 검증하지 못했습니다.') from None
+        self.gate.observe(provider, limits=data.get('limits'))
         total = (data.get('usage') or {}).get('total_tokens') if isinstance(data.get('usage'), dict) else None
         report['usage'] = {'total_tokens': total} if type(total) is int and total > 0 else {}
         report['search_entry_point'] = ''
