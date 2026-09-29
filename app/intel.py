@@ -142,6 +142,23 @@ class MarketIntel:
             errors = dict(self.errors)
         return {'rankings': rankings, 'flows': flows, 'errors': errors}
 
+    def attention(self, market, max_age=36*3600):
+        """{symbol: {kind: rank}} from the newest ranking snapshot, or None when there is none or it is stale.
+
+        Used by the daily focus screen, which runs before the open and accepts yesterday's session. A symbol that is
+        missing from the returned dict was outside the top 100 of every list that was fetched."""
+        now = self.clock()
+        with self.lock:
+            ranks = self.ranks.get(market)
+            if not ranks or now-ranks['at'] > max_age or not ranks['kinds']:
+                return None
+            kinds = {key: dict(items) for key, items in ranks['kinds'].items()}
+        result = {}
+        for key, items in kinds.items():
+            for symbol, hit in items.items():
+                result.setdefault(symbol, {})[key] = hit['rank']
+        return result
+
     def features(self, symbol, market):
         """What the AI is allowed to see for one candidate; None means "not available", not "zero"."""
         now = self.clock()

@@ -76,6 +76,34 @@ with store.edit() as s:
             'proposal_id': f'seed-{i}', 'would_submit': not blocked, 'blocked_by': blocked, 'suggested_quantity': 1 if blocked and blocked[0] == 'max-order' else 0,
             'protective': {'stop_trigger': str(round(price*.985, 2)), 'take_profit_trigger': str(round(price*1.03, 2))} if side == 'BUY' and not blocked else None,
             'sim_status': 'filled'})
+# Today's focus list, built by the real engine from synthetic uptrend candles (the demo provider's own daily candles are a flat sine wave).
+from app.instruments import CATALOGUE
+import math
+_daily = {c['symbol']: .0012+(i % 7)*.0007 for i, c in enumerate(CATALOGUE)}
+_daily['NVDA'] = -.004                                    # a downtrend name, so the "excluded" list has real reasons
+_daily['AMD'] = .022                                      # stretched far above its 20-day average
+
+def _candles(symbol, interval='1d', _orig=engine.provider.candles):
+    if interval != '1d':
+        return _orig(symbol, interval)
+    end = int(time.time()//86400)*86400
+    base = DemoProvider.__dict__['candles'] and 100.0
+    return [{'time': end-(40-i)*86400, 'open': base*(1+_daily[symbol])**i, 'high': base*(1+_daily[symbol])**i*1.01,
+             'low': base*(1+_daily[symbol])**i*.99, 'close': base*(1+_daily[symbol])**i, 'volume': 1e9, 'currency': 'USD',
+             'interval': '1d', 'completed': True} for i in range(40)]
+engine.provider.candles = _candles
+engine.focus_pause = 0
+engine.start()
+engine.refresh()
+engine.refresh_focus()
+with store.edit() as s:
+    # a held name that left the list, so the rotation block is populated
+    s['positions'].setdefault('005930', {'quantity': 3, 'average': 70000.0, 'cost_basis': 210000.0, 'strategy_mode': 'intraday',
+                                          'stop_price': 68000.0, 'take_profit_price': 74000.0, 'expires_at': time.time()+7200})
+    focus = s['focus'].get('KR')
+    if focus and '005930' not in [p['symbol'] for p in focus['picks']]:
+        s['positions']['005930']['rotation'] = {'action': 'keep', 'pnl_pct': 1.2, 'trend_ok': True, 'at': time.time(), 'session_date': focus['session_date'],
+                                                 'reason': '추세가 유지돼 강제로 팔지 않고 손절·익절·보유시간 규칙에 맡깁니다. 추가 매수는 하지 않습니다.'}
 engine.stop()
 store.release()
 print('seeded')

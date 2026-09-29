@@ -15,6 +15,8 @@ from .intel import FLOW_DAYS, FLOW_TTL, MarketIntel, RANK_KINDS, RANK_RETRY, RAN
 from .config import ROLES
 from .instruments import INSTRUMENTS, SYMBOLS
 from .desk import DeskMixin
+from .focus import FocusMixin, universe_mode
+from . import universe
 from .risk import normalize_settings, RiskError
 from .providers import DemoProvider, ProviderError, RateLimited, TossProvider
 from .performance import performance_summary, record_performance
@@ -38,9 +40,10 @@ def equity(s, currency):
     return money(value)
 
 
-class Engine(DeskMixin):
+class Engine(DeskMixin, FocusMixin):
     def __init__(self, config, store, provider=None):
         self.c, self.store = config, store
+        self.focus_attempts = {}   # market -> (time of the last build attempt, consecutive failures, session date)
         self.provider = provider or (DemoProvider() if config.mode == 'demo' else TossProvider(config))
         self.agents = Agents(config, store)
         self.intel = MarketIntel()
@@ -565,6 +568,13 @@ class Engine(DeskMixin):
             if s['history'][-1] != history[-1]:
                 s['history'].append(history[-1])
         s['intel'] = self.intel.status()
+        # The published lists without their working data; the reference prices stay server-side.
+        s['focus'] = {market: {k: v for k, v in entry.items() if k not in ('ranked', 'metrics')}
+                      for market, entry in (s.get('focus') or {}).items()}
+        s['focus_eval'] = universe.summarize(s.get('focus_history') or [])
+        s['focus_history'] = [{k: v for k, v in r.items() if k != 'ref'} for r in (s.get('focus_history') or [])[-10:]]
+        s['focus_config'] = {'mode': universe_mode(s) if s.get('strategy_mode') == 'intraday' else 'fixed',
+                             'per_market': self.c.focus_per_market, 'ai': self.c.focus_ai}
         s['live'] = {'config': self.c.live.public(), 'shadow': shadow_summary(s),
                      'halt': (s.get('live') or {}).get('halt', {'active': False})}
         s.pop('shadow_orders', None)

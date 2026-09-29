@@ -15,7 +15,7 @@ CSS = (STATIC/'style.css').read_text(encoding='utf-8')
 # Hooks that are deliberately unstyled (structure/semantics only, or styled through SVG attributes).
 UNSTYLED = {'approvals', 'brand-name', 'eq-area', 'market-panel', 'positions-panel', 'sp-area', 'tile-usd'}
 # ids the script builds from a prefix (for example $('performance-' + id) with id in kr/us).
-DYNAMIC_IDS = {prefix+suffix for prefix in ('performance-', 'nav-', 'cash-', 'return-', 'valuation-') for suffix in ('kr', 'us')} | {'ai-ring-pct'}
+DYNAMIC_IDS = {prefix+suffix for prefix in ('performance-', 'nav-', 'cash-', 'return-', 'valuation-', 'focus-') for suffix in ('kr', 'us')} | {'ai-ring-pct'}
 
 
 def html_ids():

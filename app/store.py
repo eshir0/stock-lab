@@ -17,7 +17,8 @@ def initial(mode, seed_krw=10000000.0, seed_usd=10000.0, name='첫 실험'):
             'experiment_id': str(uuid.uuid4()), 'experiment_name': name, 'started_at': now,
             'cash': {'KRW': seed_krw, 'USD': seed_usd}, 'initial': {'KRW': seed_krw, 'USD': seed_usd},
             'positions': {}, 'quotes': {}, 'proposals': [], 'trades': [], 'events': [], 'runs': [],
-            'daily_ai': {}, 'last_error': '', 'next_run': 0, 'cycle': 0, 'history': [], 'cursor': 0}
+            'daily_ai': {}, 'last_error': '', 'next_run': 0, 'cycle': 0, 'history': [], 'cursor': 0,
+            'focus': {}, 'focus_history': []}
     record_performance(state, now=now, force=True)
     return state
 
@@ -30,6 +31,8 @@ def ensure_defaults(state):
     state.setdefault('strategy_mode', 'legacy')
     state.setdefault('strategy_settings', {})
     state.setdefault('risk_days', {})
+    state.setdefault('focus', {})
+    state.setdefault('focus_history', [])
     state.setdefault('experiment_id', str(uuid.uuid4()))
     state.setdefault('experiment_name', '첫 실험')
     state.setdefault('started_at', min([item['time'] for item in state.get('history', [])] or [now]))

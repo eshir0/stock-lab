@@ -41,6 +41,9 @@ class Config:
     # Parallel Toss order-book reads (each symbol needs its own call); clamped to 1-8.
     toss_parallel: int = max(1, min(8, int(os.getenv('TOSS_PARALLEL', '4'))))
     interval_seconds: int = max(60, int(os.getenv('ANALYSIS_INTERVAL_SECONDS', '900')))
+    # Daily focus list: names per market the intraday desk may buy, and whether the AI reads the news for it.
+    focus_per_market: int = max(1, min(6, int(os.getenv('FOCUS_PER_MARKET', '3'))))
+    focus_ai: bool = os.getenv('FOCUS_AI', 'on').strip().lower() not in ('off', 'false', '0', 'no')
     proposal_seconds: int = 180
     quote_age: int = 30
     fee_kr: float = float(os.getenv('FEE_KR_BPS', '15'))

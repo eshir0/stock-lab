@@ -9,6 +9,10 @@ class RiskError(ValueError):
     pass
 
 
+# 'daily_focus': a data- and news-checked short list per market each morning; 'fixed': the fixed lineup.
+UNIVERSE_MODES = ('daily_focus', 'fixed')
+
+
 def _decimal(value, name, minimum=None, maximum=None):
     if type(value) not in (int, float, Decimal):
         raise RiskError(f'{name}: 유효한 숫자가 필요합니다.')
@@ -45,12 +49,15 @@ def normalize_settings(settings=None):
     leveraged = settings.get('include_leveraged_etfs', True)
     if type(leveraged) is not bool:
         raise RiskError('레버리지 ETF 포함 여부는 참 또는 거짓이어야 합니다.')
+    universe = settings.get('universe_mode', 'daily_focus')
+    if universe not in UNIVERSE_MODES:
+        raise RiskError('종목 구성 방식은 daily_focus 또는 fixed여야 합니다.')
     risk = _decimal(settings.get('risk_per_trade_pct', .5), '거래당 위험 비율', .1, 2)
     daily = _decimal(settings.get('daily_loss_limit_pct', 2), '일일 손실 한도', 1, 10)
     holding = _decimal(settings.get('max_holding_minutes', 120), '최대 보유 시간', 15, 240)
     if holding != holding.to_integral_value():
         raise RiskError('최대 보유 시간은 정수 분으로 입력하세요.')
-    return {'include_leveraged_etfs': leveraged, 'risk_per_trade_pct': float(risk),
+    return {'include_leveraged_etfs': leveraged, 'universe_mode': universe, 'risk_per_trade_pct': float(risk),
             'daily_loss_limit_pct': float(daily), 'max_holding_minutes': int(holding)}
 
 

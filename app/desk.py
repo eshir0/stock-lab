@@ -17,6 +17,7 @@ from .performance import performance_summary
 from .providers import ProviderError
 from .risk import RiskError, size_order
 from .store import event
+from .universe import ROTATION_WARMUP
 
 MARKET_LABELS = {'KR': '국내', 'US': '미국'}
 DESK_CALLS = len(DESK_ROLES)+1  # stock selection + six research roles
@@ -58,10 +59,17 @@ def candidate_summary(symbol, quote, candles, state, limits, now):
 
 class DeskMixin:
     def active_instruments(self, state):
+        """What the desk quotes, analyses and may buy: the fixed lineup, or today's focus list per market (a market with
+        no usable list falls back to the fixed lineup). Held names always stay in, so their exits keep being managed."""
         if state.get('strategy_mode') != 'intraday':
             return BASE_INSTRUMENTS
-        include = state['strategy_settings'].get('include_leveraged_etfs', False)
-        return [i for i in INSTRUMENTS if include or not i.get('leveraged_etf')]
+        settings = state['strategy_settings']
+        if settings.get('universe_mode', 'daily_focus') != 'daily_focus':
+            include = settings.get('include_leveraged_etfs', False)
+            return [i for i in INSTRUMENTS if include or not i.get('leveraged_etf')]
+        symbols = self.buyable_symbols(state)
+        symbols += [s for s in state.get('positions', {}) if s not in symbols]
+        return [SYMBOLS[s] for s in symbols if s in SYMBOLS]
 
     def update_desk_risk(self, state, now=None):
         if state.get('strategy_mode') != 'intraday':
@@ -97,6 +105,8 @@ class DeskMixin:
                                 'reason': ', '.join(halted)+' 일일 손실 한도 · 신규 매수 중단, 청산 감시 유지' if halted else '위험 한도 내 · 실행 중에만 청산 규칙을 감시합니다.'}
 
     def desk_buy_allowed(self, state, symbol):
+        if not self.focus_allows(state, symbol):
+            raise ProviderError('오늘의 집중 종목이 아니어서 신규 매수하지 않습니다. 보유 중이면 추가 매수 없이 청산 규칙으로 관리합니다.')
         currency = SYMBOLS[symbol]['currency']
         for held in state['positions']:
             if SYMBOLS[held]['currency'] == currency:
@@ -187,6 +197,8 @@ class DeskMixin:
                         reason = '최대 보유시간'
                     elif now >= q['session_end']-120:
                         reason = '장 마감 전 청산'
+                    elif (pos.get('rotation') or {}).get('action') == 'sell' and now >= q['session_start']+ROTATION_WARMUP:
+                        reason = '종목 교체 청산'
                     if not reason:
                         continue
                     qty = min(pos['quantity'], int(q['bid_size']), 10000)

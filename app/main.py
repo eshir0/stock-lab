@@ -3,6 +3,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import time
@@ -72,6 +73,16 @@ def create_app(config=None, background=True, test=False):
                 pass
             await asyncio.sleep(15)
 
+    async def focus_loop():
+        while True:
+            try:
+                await asyncio.to_thread(engine.refresh_focus)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            await asyncio.sleep(30)
+
     async def work():
         while True:
             try:
@@ -87,7 +98,7 @@ def create_app(config=None, background=True, test=False):
         store.claim_process()
         engine.boot()
         tasks = [asyncio.create_task(monitor()), asyncio.create_task(work()),
-                 asyncio.create_task(intel_loop())] if background else []
+                 asyncio.create_task(intel_loop()), asyncio.create_task(focus_loop())] if background else []
         yield
         engine.stop()
         for t in tasks:
@@ -113,6 +124,31 @@ def create_app(config=None, background=True, test=False):
         # The public origin is configured by the owner; forwarded headers are not trusted.
         return request.url.scheme+'://'+host
 
+    def on_public_origin(request):
+        """The browser says it is on our configured public origin. A reverse proxy or tunnel may rewrite Host (to its
+        upstream address, or add the default port), but it cannot change what the browser sends in Origin, and a page on
+        another site cannot claim to be this origin."""
+        return bool(public_origin) and request.headers.get('origin') == public_origin
+
+    def origin_ok(request):
+        origin = request.headers.get('origin')
+        return not origin or origin == browser_origin(request) or on_public_origin(request)
+
+    gate_log = logging.getLogger('uvicorn.error')
+    gate_seen = {}
+
+    def note_rejection(request, reason):
+        """Say why a write was refused, once per distinct cause every five minutes. Headers only: no body, no cookies."""
+        now = time.time()
+        key = (reason, request.headers.get('host', '')[:80], request.headers.get('origin', '')[:80])
+        if now-gate_seen.get(key, 0) < 300:
+            return
+        if len(gate_seen) > 200:
+            gate_seen.clear()
+        gate_seen[key] = now
+        gate_log.warning('write refused (%s) %s %s host=%r origin=%r peer=%s', reason, request.method, request.url.path,
+                         key[1], key[2], request.client.host if request.client else '-')
+
     def signed(value):
         digest = hmac.new(c.session_secret.encode(), value.encode(), hashlib.sha256).hexdigest()
         return value+'.'+digest
@@ -129,9 +165,11 @@ def create_app(config=None, background=True, test=False):
     async def access(request: Request, call_next):
         if request.url.path.startswith('/api/'):
             if request.method != 'GET':
-                origin = request.headers.get('origin')
-                expected = browser_origin(request)
-                if request.headers.get('x-stocklab-action') != '1' or (origin and origin != expected):
+                if request.headers.get('x-stocklab-action') != '1':
+                    note_rejection(request, 'missing-action-header')
+                    return JSONResponse({'detail': '허용되지 않은 요청입니다.'}, status_code=403)
+                if not origin_ok(request):
+                    note_rejection(request, 'origin-mismatch')
                     return JSONResponse({'detail': '허용되지 않은 요청입니다.'}, status_code=403)
             if request.url.path != '/api/login' and not authenticated(request):
                 return JSONResponse({'detail': '로그인이 필요합니다.'}, status_code=401)
@@ -174,7 +212,7 @@ def create_app(config=None, background=True, test=False):
         failures.pop(remote, None)
         token = signed(str(int(time.time()+28800))+':'+secrets.token_urlsafe(24))
         response.set_cookie('stocklab_session', token, httponly=True, samesite='strict',
-                            secure=browser_origin(request).startswith('https://'), max_age=28800)
+                            secure=browser_origin(request).startswith('https://') or on_public_origin(request), max_age=28800)
         return {'ok': True}
 
     @app.post('/api/logout')
@@ -223,6 +261,7 @@ def create_app(config=None, background=True, test=False):
         max_order_pct: float = Field(default=30, ge=1, le=30, allow_inf_nan=False, strict=True)
         strategy_mode: Literal['legacy', 'intraday'] = 'legacy'
         include_leveraged_etfs: bool = Field(default=True, strict=True)
+        universe_mode: Literal['daily_focus', 'fixed'] = 'daily_focus'
         risk_per_trade_pct: float = Field(default=.5, ge=.1, le=2, allow_inf_nan=False, strict=True)
         daily_loss_limit_pct: float = Field(default=2, ge=1, le=10, allow_inf_nan=False, strict=True)
         max_holding_minutes: int = Field(default=120, ge=15, le=240, strict=True)
@@ -235,6 +274,7 @@ def create_app(config=None, background=True, test=False):
         result = engine.new_experiment(data.seed_krw, data.seed_usd, data.name, data.max_order_pct,
                                       strategy_mode=data.strategy_mode, strategy_settings={
                                           'include_leveraged_etfs': data.include_leveraged_etfs,
+                                          'universe_mode': data.universe_mode,
                                           'risk_per_trade_pct': data.risk_per_trade_pct,
                                           'daily_loss_limit_pct': data.daily_loss_limit_pct,
                                           'max_holding_minutes': data.max_holding_minutes})

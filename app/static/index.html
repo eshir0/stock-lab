@@ -46,6 +46,7 @@
   <nav class="topnav" aria-label="섹션 이동">
     <a href="#sec-control"><svg class="ic"><use href="#i-dashboard"/></svg><span>컨트롤룸</span></a>
     <a href="#sec-market"><svg class="ic"><use href="#i-chart"/></svg><span>시세·결정</span></a>
+    <a href="#sec-focus"><svg class="ic"><use href="#i-target"/></svg><span>집중 종목</span></a>
     <a href="#sec-agents"><svg class="ic"><use href="#i-users"/></svg><span>에이전트</span></a>
     <a href="#sec-eval"><svg class="ic"><use href="#i-scale"/></svg><span>AI 검증</span></a>
     <a href="#sec-live"><svg class="ic"><use href="#i-lock"/></svg><span>실거래 준비</span></a>
@@ -76,6 +77,13 @@
 </section>
 <div class="work-grid" id="sec-market"><section class="panel market-panel"><div class="section-title"><div><p class="eyebrow">WATCHLIST</p><h2>관심종목</h2></div><span id="poll-label" class="pill">10초 조회</span></div><div id="watchlist"></div><div class="chart-heading"><div><strong id="chart-title">원화 평가자산</strong><span class="muted small"> · 이번 기록 구간</span></div><select id="chart-currency" aria-label="차트 통화"><option value="KRW">KRW</option><option value="USD">USD</option></select></div><svg id="equity-chart" viewBox="0 0 600 180" role="img" aria-label="가상 계좌 평가자산 추이"></svg><p id="chart-note" class="muted small"></p></section>
 <section class="panel approvals"><div class="section-title"><div><p class="eyebrow">DECISIONS</p><h2 id="decision-title">나의 결정</h2></div><span id="pending-count" class="count">0</span></div><div id="proposal-list"></div></section></div>
+<section class="panel focus-panel" id="sec-focus" aria-label="오늘의 집중 종목">
+<div class="section-title"><div><p class="eyebrow">DAILY FOCUS</p><h2>오늘의 집중 종목</h2><p class="muted small">개장 90분 전에 후보 종목을 일봉 데이터로 먼저 거르고(하락 추세·이미 급등한 종목·거래대금 부족은 제외), AI가 뉴스와 테마를 확인해 시장별로 고릅니다. AI는 걸러진 후보 안에서만 고를 수 있고 출처가 없으면 반영하지 않습니다. 오늘 목록 밖의 종목은 신규 매수하지 않으며, 과거 성과 기준이라 수익을 보장하지 않습니다.</p></div><span id="focus-mode" class="pill">일일 집중</span></div>
+<div class="focus-grid"><article id="focus-kr" class="focus-col" aria-label="국내 집중 종목"></article><article id="focus-us" class="focus-col" aria-label="미국 집중 종목"></article></div>
+<div id="focus-held" class="focus-held"></div>
+<p id="focus-eval" class="focus-eval small muted"></p>
+<details class="more"><summary>제외된 종목과 이유</summary><div id="focus-excluded" class="focus-excluded"></div></details>
+</section>
 <section class="panel team-panel" id="sec-agents"><div class="section-title"><div><p class="eyebrow">AGENT DESK</p><h2>에이전트 데스크</h2><p class="muted small" id="team-context">실행하면 역할별 분석이 이곳에 쌓입니다.</p></div><div class="inline-controls"><select id="analyze-symbol" aria-label="분석 종목"></select><button id="analyze" class="secondary">지금 분석</button></div></div><p id="research-flow" class="research-flow small muted"></p><p id="intel-status" class="intel-status small muted"></p><div id="team" class="team"></div><div id="sizing-summary" class="sizing-summary" hidden></div><div id="reports" class="reports"></div></section>
 <section class="panel eval-panel" id="sec-eval" aria-label="AI 판단 검증"><div class="section-title"><div><p class="eyebrow">VERIFICATION</p><h2>AI 판단 검증</h2><p class="muted small">최종 판단 시점 가격 대비 30분·60분 뒤 중간가격으로 채점합니다. 비용은 왕복 수수료·슬리피지·스프레드를 차감합니다.</p></div><span id="eval-sample" class="pill">표본 0건</span></div>
 <div class="eval-chart-head"><h3>한눈에 비교 <small class="muted">평균 순수익률(비용 차감)</small></h3><div id="eval-tabs" class="seg" role="group" aria-label="채점 기준 시간"><button type="button" data-h="30" aria-pressed="false">30분 뒤</button><button type="button" data-h="60" aria-pressed="true">60분 뒤</button></div></div>
@@ -99,6 +107,8 @@
 <fieldset id="intraday-settings" class="strategy-fields"><legend>장중 매매의 위험 기준</legend>
 <label class="checkbox-label" for="include-leveraged-etfs"><input id="include-leveraged-etfs" name="include_leveraged_etfs" type="checkbox" checked><span>레버리지·인버스 ETF를 관심종목에 포함</span></label>
 <p class="muted small">ETF 자체의 시세로 모의매매합니다. 계좌에서 돈을 빌리거나 주식을 공매도하지 않습니다.</p>
+<label class="field-label" for="universe-mode">종목 구성 방식</label><select id="universe-mode" name="universe_mode"><option value="daily_focus">일일 집중 종목 (권장) · 매일 아침 데이터와 뉴스로 시장별 선정</option><option value="fixed">고정 종목 · 삼성전자·SK하이닉스·Apple·Microsoft와 레버리지 ETF</option></select>
+<p class="muted small">일일 집중 종목은 개장 90분 전에 계산하고 그날 목록 밖의 종목은 신규 매수하지 않습니다. 계산에 실패하면 고정 종목으로 진행합니다. 이미 보유한 종목은 추세가 유지되면 그대로 두고, 꺾이면 개장 후 매도합니다.</p>
 <div class="risk-inputs"><div><label class="field-label" for="risk-per-trade">1회 손절 위험 한도 · %</label><input id="risk-per-trade" name="risk_per_trade_pct" type="number" min="0.1" max="2" step="0.1" value="0.5" required inputmode="decimal"></div><div><label class="field-label" for="daily-loss-limit">일중 손실 한도 · %</label><input id="daily-loss-limit" name="daily_loss_limit_pct" type="number" min="1" max="10" step="0.5" value="2" required inputmode="decimal"></div><div><label class="field-label" for="max-holding-minutes">최대 보유 시간 · 분</label><input id="max-holding-minutes" name="max_holding_minutes" type="number" min="15" max="240" step="1" value="120" required inputmode="numeric"></div></div>
 <p class="muted small">손절 위험은 해당 통화의 평가자산을 기준으로 수량을 제한합니다. 일중 손실 한도에 도달한 통화는 신규 매수를 막고, 실행 중인 청산 감시는 유지합니다. 급변·호가 부족 시 계획한 손실이나 보유 시간을 초과할 수 있습니다.</p>
 </fieldset>

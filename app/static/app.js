@@ -168,6 +168,7 @@ $('experiment-open').onclick = () => {
   $('max-order-pct').value = '30';
   $('strategy-mode').value = 'intraday';
   $('include-leveraged-etfs').checked = true;
+  $('universe-mode').value = 'daily_focus';
   $('risk-per-trade').value = '0.5';
   $('daily-loss-limit').value = '2';
   $('max-holding-minutes').value = '120';
@@ -201,7 +202,7 @@ $('experiment-form').addEventListener('submit', async e => {
   $('experiment-create').disabled = true;
   $('experiment-error').textContent = '';
   try {
-    await api('experiments',{name,seed_krw,seed_usd,max_order_pct,strategy_mode,...settings,confirmation:'새 실험 시작'});
+    await api('experiments',{name,seed_krw,seed_usd,max_order_pct,strategy_mode,...settings,universe_mode:$('universe-mode').value,confirmation:'새 실험 시작'});
     executionDirty = false;
     $('experiment-dialog').close();
     toast('이전 실험을 보관하고 새 실험을 만들었습니다. 운용 방식을 선택한 뒤 시작하세요.');
@@ -260,7 +261,7 @@ function renderPerformance(s, c, id) {
 function renderStrategy(s) {
   const intraday = s.strategy_mode === 'intraday', settings = s.strategy_settings || {}, risk = s.risk_status;
   $('strategy-label').textContent = intraday ? '전문가팀 · 장중 매매' : '기본 분석 · 기존 방식';
-  $('strategy-description').textContent = intraday ? `손절 위험 ${plainPercent(settings.risk_per_trade_pct)} · 일중 손실 한도 ${plainPercent(settings.daily_loss_limit_pct)} · 최대 보유 ${finite(settings.max_holding_minutes) ? settings.max_holding_minutes + '분' : '—'} · ${settings.include_leveraged_etfs ? '레버리지·인버스 ETF 포함' : '레버리지 ETF 제외'}` : '현재 실험의 기존 분석 방식을 유지합니다. 전문가팀 장중 전략은 새 실험에서 선택할 수 있습니다.';
+  $('strategy-description').textContent = intraday ? `손절 위험 ${plainPercent(settings.risk_per_trade_pct)} · 일중 손실 한도 ${plainPercent(settings.daily_loss_limit_pct)} · 최대 보유 ${finite(settings.max_holding_minutes) ? settings.max_holding_minutes + '분' : '—'} · ${settings.include_leveraged_etfs ? '레버리지·인버스 ETF 포함' : '레버리지 ETF 제외'} · ${settings.universe_mode === 'fixed' ? '고정 종목' : '일일 집중 종목'}` : '현재 실험의 기존 분석 방식을 유지합니다. 전문가팀 장중 전략은 새 실험에서 선택할 수 있습니다.';
   $('risk-status').hidden = !intraday || !risk;
   if (intraday && risk) {
     const currencies = Array.isArray(risk.halted_currencies) ? risk.halted_currencies : [];
@@ -325,6 +326,7 @@ function render() {
   renderEvaluation(s);
   renderLive(s);
   renderIntel(s);
+  renderFocus(s);
   setHtml('positions', Object.entries(s.positions).map(([symbol,p]) => {
     const i = s.instruments.find(i => i.symbol === symbol), q = s.quotes[symbol], pnl = q ? q.last * p.quantity - (p.cost_basis ?? p.average * p.quantity) : null;
     const currency = i?.currency || p.currency;
@@ -398,6 +400,61 @@ function renderIntel(s) {
   });
   parts.push(`국내 수급 ${it.flows.count}/${it.flows.tried}종목`);
   $('intel-status').textContent = '토스 공식 시장 정보 · ' + parts.join(' · ');
+}
+const kindLabels = {stock: '', etf: 'ETF', lev: '레버리지·인버스'};
+function focusPick(p, held) {
+  const ai = p.ai, kind = kindLabels[p.kind] || '';
+  const lev = finite(p.leverage_factor) && Math.abs(p.leverage_factor) > 1 ? ` ${p.leverage_factor > 0 ? '+' : ''}${p.leverage_factor}배` : '';
+  const risk = ai ? (ai.priced_in_risk === 'low' ? ['risk-low', '낮음'] : ['risk-medium', '보통']) : null;
+  const rank = finite(p.rank_amount) ? ` · 거래대금 ${p.rank_amount}위` : '';
+  const score = finite(p.score) ? Math.max(0, Math.min(100, Math.round(p.score))) : 0;
+  return `<li class="focus-pick"><div class="focus-head"><div><span class="name">${esc(p.name)}</span><span class="ticker">${esc(p.symbol)}</span>${kind ? `<span class="etf-tag">${esc(kind + lev)}</span>` : ''}</div><div class="focus-score"><b>${score}</b><span class="small muted">점</span></div></div>`
+    + `<div class="focus-bar" aria-hidden="true"><span class="focus-bar-fill" data-w="${score}"></span></div>`
+    + `<p class="focus-metrics small">최근 1개월 <b class="${p.ret_1m_pct >= 0 ? 'gain' : 'loss'}">${percent(p.ret_1m_pct)}</b> · 5일 <b>${percent(p.ret_5d_pct)}</b> · 20일선 대비 <b>${percent(p.ext_20d_pct)}</b> · 하루 변동폭 ${finite(p.atr_pct) ? p.atr_pct.toFixed(1) + '%' : '—'}${esc(rank)}</p>`
+    + `<div class="focus-chips">${p.source === 'ai' ? '<span class="focus-chip ai">AI 선정</span>' : '<span class="focus-chip">데이터 선정</span>'}${held ? '<span class="focus-chip keep">보유 중</span>' : ''}${risk ? `<span class="focus-chip ${risk[0]}">선반영 위험 ${risk[1]}</span>` : ''}${ai?.theme ? `<span class="focus-chip">${esc(ai.theme)}</span>` : ''}</div>`
+    + (ai ? `<p class="focus-why small"><b>재료</b> ${esc(ai.catalyst)} <span class="muted">· ${esc(ai.reason)}</span></p>` : '<p class="focus-why small muted">일봉 데이터 점수로 선정했습니다.</p>')
+    + '</li>';
+}
+function focusColumn(market, entry, fixed, s) {
+  const held = new Set(Object.keys(s.positions || {})), ai = entry?.ai || {};
+  let status;
+  if (fixed) status = ['wait', '고정 종목 사용 중'];
+  else if (!entry) status = ['wait', '개장 90분 전에 계산합니다 · 그때까지 기본 종목'];
+  else if (entry.status === 'fallback') status = ['warn', '계산 실패 · 오늘은 기본 종목'];
+  else if (entry.status === 'ok') status = ['ok', 'AI 뉴스 검토 + 일봉 데이터'];
+  else status = ['warn', ai.status === 'failed' ? '일봉 데이터만 · AI 브리핑 실패' : ai.status === 'skipped' ? '일봉 데이터만 · AI 사용 안 함' : ai.status === 'ok' ? '일봉 데이터만 · AI 답변에 출처 없음' : '일봉 데이터만 · 분석을 시작하면 AI 브리핑 추가'];
+  let body = '';
+  if (entry && entry.status === 'fallback') {
+    body = `<p class="small muted">${esc((entry.notes || [])[0] || '')}</p>`;
+  } else if (entry && !fixed) {
+    body += ai.market_view ? `<p class="focus-view">${esc(ai.market_view)}</p>` : '';
+    body += Array.isArray(ai.themes) && ai.themes.length ? `<div class="focus-chips">${ai.themes.map(t => `<span class="focus-chip">${esc(t)}</span>`).join('')}</div>` : '';
+    body += entry.picks.length ? `<ol class="focus-list">${entry.picks.map(p => focusPick(p, held.has(p.symbol))).join('')}</ol>` : empty('조건을 통과한 종목이 없습니다', '이 시장은 오늘 신규 매수 없이 보유분만 관리합니다.');
+    body += (entry.notes || []).map(n => `<p class="small muted">${esc(n)}</p>`).join('');
+    body += (ai.avoid || []).length ? `<p class="small muted"><b>오늘 피할 종목</b> ${ai.avoid.map(a => esc(a.symbol) + ' (' + esc(a.reason) + ')').join(' · ')}</p>` : '';
+  }
+  return `<div class="focus-colhead"><h3>${market === 'KR' ? '국내' : '미국'}</h3><span class="focus-status ${status[0]}">${esc(status[1])}</span></div>`
+    + (entry?.built_at ? `<p class="small muted">${dateTime(entry.built_at)} 계산 · 거래일 ${esc(entry.session_date)}</p>` : '') + body;
+}
+function renderFocus(s) {
+  const cfg = s.focus_config || {}, focus = s.focus || {}, fixed = s.strategy_mode !== 'intraday' || cfg.mode !== 'daily_focus';
+  $('focus-mode').textContent = fixed ? '고정 종목' : `일일 집중 · 시장별 ${cfg.per_market || 3}개`;
+  $('sec-focus').classList.toggle('is-off', fixed);
+  for (const m of ['KR', 'US']) setHtml('focus-' + m.toLowerCase(), focusColumn(m, focus[m], fixed, s));
+  const rows = Object.entries(s.positions || {}).filter(([, p]) => p.rotation).map(([symbol, p]) => {
+    const i = s.instruments.find(x => x.symbol === symbol), r = p.rotation;
+    return `<div class="focus-held-row"><div><strong>${esc(i?.name || symbol)}</strong> <span class="focus-chip ${r.action === 'keep' ? 'keep' : 'sell'}">${r.action === 'keep' ? '유지' : '개장 후 매도'}</span></div><p class="small muted">${finite(r.pnl_pct) ? '평가손익 ' + percent(r.pnl_pct) + ' · ' : ''}${esc(r.reason)}</p></div>`;
+  });
+  setHtml('focus-held', rows.length ? `<h3>목록에서 빠진 보유 종목</h3>${rows.join('')}` : '');
+  const e = s.focus_eval?.all, pp = v => percent(v).replace('%', '%p');
+  $('focus-eval').textContent = !e || !e.days
+    ? '선정 성과 채점: 아직 측정된 날이 없습니다. 선정 다음 거래일의 종가가 나오면 후보 전체 평균과 비교해 기록합니다. 표본이 쌓이기 전에는 이 방식의 효과를 판단할 수 없습니다.'
+    : `선정 성과(종가 기준 참고, 표본 ${e.days}일): 선정 평균 ${percent(e.pick_pct)} · 후보 전체 평균 ${percent(e.pool_pct)} · 초과 ${pp(e.excess_pool_pct)}${finite(e.excess_fixed_pct) ? ` · 기존 고정 종목 대비 ${pp(e.excess_fixed_pct)}` : ''} · 이긴 날 ${e.beat_pool_days}/${e.days}. 표본이 적으면 우연일 수 있고 실제 매매 손익과는 다릅니다.`;
+  const excluded = ['KR', 'US'].map(m => {
+    const list = focus[m]?.excluded || [];
+    return list.length ? `<h4>${m === 'KR' ? '국내' : '미국'}</h4><ul class="focus-excluded-list">${list.map(x => `<li><strong>${esc(x.name)}</strong> <span class="muted">${esc(x.symbol)}</span> — ${esc((x.reasons || []).join(' · '))}</li>`).join('')}</ul>` : '';
+  }).join('');
+  setHtml('focus-excluded', excluded || empty('제외된 종목이 없습니다', '아직 오늘의 목록을 계산하지 않았거나 모든 후보가 조건을 통과했습니다.'));
 }
 function renderLive(s) {
   const live = s.live;
