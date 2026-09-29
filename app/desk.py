@@ -11,6 +11,8 @@ from .agents import DESK_ROLES, STOPPED, market_context
 from .config import INSTRUMENTS as BASE_INSTRUMENTS
 from .instruments import INSTRUMENTS, SYMBOLS
 from .evaluation import mid, record_decision
+from .live.shadow import record_shadow
+from .rules import signals
 from .performance import performance_summary
 from .providers import ProviderError
 from .risk import RiskError, size_order
@@ -140,6 +142,17 @@ class DeskMixin:
             sizing['quantity'] = proposal['quantity']
         return sizing
 
+    def shadow(self, s, proposal, quote, source, sizing=None):
+        """Record the live order this proposal would have produced. It never touches a broker and can never
+        interrupt paper trading: any failure is logged and swallowed."""
+        if not self.c.live.shadow:
+            return
+        try:
+            record_shadow(s, proposal=proposal, quote=quote, instrument=SYMBOLS[proposal['symbol']],
+                          config=self.c.live, source=source, now=time.time(), sizing=sizing)
+        except Exception as exc:
+            event(s, '실거래 그림자 기록에 실패했습니다(모의매매에는 영향 없음): '+type(exc).__name__, 'warning')
+
     def process_desk_exits(self):
         snapshot = self.store.read()
         if snapshot.get('strategy_mode') != 'intraday' or not snapshot['running'] or snapshot['liquidating']:
@@ -201,6 +214,7 @@ class DeskMixin:
                     else:
                         event(s, f'{SYMBOLS[symbol]["name"]} {reason}: 모의매도 승인을 기다립니다.')
                     s['proposals'].append(proposal)
+                    self.shadow(s, proposal, q, 'exit')
             except (ValueError, ProviderError, KeyError):
                 # Closed sessions and missing books never become synthetic fills.
                 continue
@@ -263,10 +277,12 @@ class DeskMixin:
                    'strategy_settings': snapshot['strategy_settings'],
                    'portfolio': {'cash': snapshot['cash'][currency],
                                  'day_pnl_pct': (risk.get('day_pnl_pct') or {}).get(currency)},
-                   'candidates': [candidate_summary(c[0], c[2], c[3], snapshot, c[4], now) for c in market_pool]}
+                   'candidates': [dict(candidate_summary(c[0], c[2], c[3], snapshot, c[4], now),
+                                       **self.intel.features(c[0], market)) for c in market_pool]}
             try:
                 selection = self.agents.run('selector', ctx, gen)
                 selection.update(role='selector', name=f'메인 디렉터 · 종목 선정 ({label})', time=time.time())
+                selection['inputs'] = ctx['candidates']
                 chosen = next(c for c in market_pool if c[0] == selection['symbol'])
             except ProviderError as exc:
                 if str(exc) == STOPPED:
@@ -295,6 +311,7 @@ class DeskMixin:
                        portfolio={'cash': account['cash'], 'positions': account['positions'], 'risk_status': account.get('risk_status', {})},
                        universe=[{'symbol': i['symbol'], 'name': i['name'], 'quote': account['quotes'].get(i['symbol'])} for i in self.active_instruments(account)])
         context['constraints'].update(self.order_constraints(account, symbol, quote))
+        context['market_intel'] = self.intel.features(symbol, SYMBOLS[symbol]['market'])
         role_names = dict(DESK_ROLES)
 
         def research(role, specific_context):
@@ -345,7 +362,7 @@ class DeskMixin:
             scorecard = record_decision(
                 s, run_id=run_id, symbol=symbol, market=SYMBOLS[symbol]['market'], decision=decision, quote=fresh,
                 candidates={c[0]: mid(c[2]) for c in market_pool if c[0] != symbol} if selection else {},
-                selected_by=run.get('selected_by', 'server'), now=time.time(),
+                selected_by=run.get('selected_by', 'server'), now=time.time(), rules=signals(candles),
                 cost_bps=2*fee+2*self.c.slippage_bps+(self.c.sell_tax_kr if currency == 'KRW' else 0)+spread)
             if decision['stance'] == 'HOLD' or s['revision'] != rev:
                 event(s, SYMBOLS[symbol]['name']+' · 관망 또는 계좌 변경으로 체결하지 않습니다.')
@@ -382,6 +399,7 @@ class DeskMixin:
                         if p['status'] == 'pending':
                             p['status'] = 'invalidated'
                 s['proposals'].append(proposal)
+                self.shadow(s, proposal, fresh, 'ai', sizing)
                 if scorecard:
                     scorecard['action'] = proposal['status']
                 event(s, f'{SYMBOLS[symbol]["name"]} 목표 비중·손절 위험으로 {sizing["quantity"]}주 산정 · '+('자동 체결' if s['execution_mode'] == 'auto' else '승인 대기'))

@@ -5,15 +5,18 @@ import time
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from .agents import Agents, DESK_ROLES, market_context
 from .desk import DESK_CALLS
 from .evaluation import summarize, update_outcomes
+from .live.shadow import shadow_summary
+from .intel import FLOW_DAYS, FLOW_TTL, MarketIntel, RANK_KINDS, RANK_RETRY, RANK_TTL, parse_investor_trading, parse_rankings
 from .config import ROLES
 from .instruments import INSTRUMENTS, SYMBOLS
 from .desk import DeskMixin
 from .risk import normalize_settings, RiskError
-from .providers import DemoProvider, ProviderError, TossProvider
+from .providers import DemoProvider, ProviderError, RateLimited, TossProvider
 from .performance import performance_summary, record_performance
 from .store import event
 
@@ -40,6 +43,8 @@ class Engine(DeskMixin):
         self.c, self.store = config, store
         self.provider = provider or (DemoProvider() if config.mode == 'demo' else TossProvider(config))
         self.agents = Agents(config, store)
+        self.intel = MarketIntel()
+        self.intel_pause = .25     # seconds between ranking calls: gentle on the ranking group's small burst
         self.busy = threading.Lock()
 
     def boot(self):
@@ -173,6 +178,65 @@ class Engine(DeskMixin):
             message = str(e) if isinstance(e, ProviderError) else '시세 갱신 실패. 최신 시세를 받을 때까지 거래를 차단합니다.'
             with self.store.edit() as s:
                 s['last_error'] = message
+
+    def refresh_intel(self):
+        """Official ranking and investor-flow reads on their own slow cadence.
+
+        A failure here only removes extra context for the AI; quotes, exits and trading never wait on it.
+        """
+        if not hasattr(self.provider, 'rankings'):
+            return
+        state = self.store.read()
+        now = time.time()
+        universe = self.active_instruments(state)
+        today = datetime.now(ZoneInfo('Asia/Seoul')).date().isoformat()
+        for market in sorted({item['market'] for item in universe}):
+            quotes = [state['quotes'].get(item['symbol'], {}) for item in universe if item['market'] == market]
+            is_open = any(q.get('session_start', 0) <= now < q.get('session_end', 0) for q in quotes)
+            age, attempt = self.intel.rank_age(market), self.intel.attempt_age(market)
+            missing = [entry for entry in RANK_KINDS if entry[0] not in self.intel.kinds(market)]
+            due = attempt is None or attempt >= RANK_RETRY
+            # One snapshot while closed keeps the cache warm; refresh on a schedule only while it trades.
+            # A list that failed is retried on its own soon, without refetching the ones that worked.
+            full = due and (age is None or (is_open and age >= RANK_TTL))
+            retry = due and is_open and bool(missing) and not full
+            if full or retry:
+                self.intel.mark_attempt(market)
+                kinds = {}
+                for key, kind, duration in (RANK_KINDS if full else missing):
+                    try:
+                        parsed = parse_rankings(self.provider.rankings(market, kind, duration, 100))
+                    except RateLimited as exc:
+                        self.intel.note_error(market, key, exc)
+                        break                       # the group is busy: stop asking until the next round
+                    except ProviderError as exc:
+                        self.intel.note_error(market, key, exc)
+                        continue
+                    finally:
+                        time.sleep(self.intel_pause)
+                    if parsed is None:
+                        self.intel.note_error(market, key, '응답 형식을 해석하지 못했습니다.')
+                        continue
+                    self.intel.note_error(market, key, '')
+                    kinds[key] = parsed['items']
+                if kinds:
+                    self.intel.store_rankings(market, kinds, merge=not full)
+            if market != 'KR':
+                continue
+            for item in universe:
+                if item['market'] != 'KR':
+                    continue
+                flow_age = self.intel.flow_age(item['symbol'])
+                if flow_age is not None and not (is_open and flow_age >= FLOW_TTL):
+                    continue
+                try:
+                    data = parse_investor_trading(self.provider.investor_trading(item['symbol'], FLOW_DAYS), today)
+                    self.intel.note_error('KR', 'flow-'+item['symbol'], '' if data else '응답 형식을 해석하지 못했습니다.')
+                except ProviderError as exc:
+                    self.intel.note_error('KR', 'flow-'+item['symbol'], exc)
+                    data = None
+                # A failed or unsupported symbol is retried on the normal schedule, never in a tight loop.
+                self.intel.store_flow(item['symbol'], data)
 
     def validate_quote(self, q, symbol):
         if q.get('mode') != self.c.mode or q.get('symbol') != symbol or q.get('currency') != SYMBOLS[symbol]['currency']:
@@ -500,6 +564,10 @@ class Engine(DeskMixin):
             s['history'] = history[::math.ceil(len(history)/999)]
             if s['history'][-1] != history[-1]:
                 s['history'].append(history[-1])
+        s['intel'] = self.intel.status()
+        s['live'] = {'config': self.c.live.public(), 'shadow': shadow_summary(s),
+                     'halt': (s.get('live') or {}).get('halt', {'active': False})}
+        s.pop('shadow_orders', None)
         evaluations = s.get('evaluations', [])
         s['evaluation'] = summarize(evaluations)
         s['evaluations'] = [{k: v for k, v in e.items() if k != 'candidates'} for e in evaluations[-30:]]
@@ -508,6 +576,7 @@ class Engine(DeskMixin):
         s['server_time'] = time.time()
         s['config'] = {'ai_configured': self.c.ai_configured,
                        'toss_configured': bool(self.c.toss_id and self.c.toss_secret),
+                       'toss_rate': {group: dict(info) for group, info in (getattr(self.provider, 'rates', None) or {}).items()},
                        'model': self.c.model, 'providers': self.c.provider_order, 'daily_limit': self.c.ai_daily_calls,
                        'poll': self.c.poll_seconds, 'interval': self.c.interval_seconds,
                        'fee_kr_bps': self.c.fee_kr, 'fee_us_bps': self.c.fee_us,

@@ -6,6 +6,8 @@ Nothing here changes trading; it only measures whether the AI's calls beat doing
 """
 import math
 
+from .rules import RULES
+
 HORIZONS = (30, 60)
 MAX_RECORDS = 1000
 LATE_LIMIT = 600
@@ -20,7 +22,7 @@ def mid(quote):
     return (bid+ask)/2 if bid > 0 and ask > 0 and math.isfinite(bid+ask) else None
 
 
-def record_decision(s, *, run_id, symbol, market, decision, quote, candidates, selected_by, cost_bps, now):
+def record_decision(s, *, run_id, symbol, market, decision, quote, candidates, selected_by, cost_bps, now, rules=None):
     price = mid(quote)
     if price is None:
         return None
@@ -28,7 +30,7 @@ def record_decision(s, *, run_id, symbol, market, decision, quote, candidates, s
              'stance': decision.get('stance'), 'target_weight_pct': decision.get('target_weight_pct'),
              'engine': str(decision.get('engine') or ''), 'selected_by': selected_by, 'action': 'hold',
              'price': price, 'session_end': quote.get('session_end'), 'cost_bps': round(cost_bps, 2),
-             'candidates': {k: v for k, v in candidates.items() if v}, 'outcomes': {}}
+             'candidates': {k: v for k, v in candidates.items() if v}, 'rules': dict(rules or {}), 'outcomes': {}}
     records = s.setdefault('evaluations', [])
     records.append(entry)
     del records[:-MAX_RECORDS]
@@ -81,6 +83,30 @@ def _rate(flags):
     return round(sum(flags)/len(flags)*100, 1) if flags else None
 
 
+def _net(stance, move, cost_bps):
+    """Result of acting on a stance: buy earns the move, sell avoids it, hold earns nothing; trades pay costs."""
+    if stance == 'BUY':
+        return move-cost_bps/100
+    if stance == 'SELL':
+        return -move-cost_bps/100
+    return 0.0
+
+
+def _rule_rows(scored, move, key):
+    """Each rule scored on the same decision moments and costs as the AI (only where it could be computed)."""
+    rows = {}
+    for name in RULES:
+        subset = [e for e in scored if (e.get('rules') or {}).get(name) in ('BUY', 'SELL', 'HOLD')]
+        trades = [e for e in subset if e['rules'][name] in ('BUY', 'SELL')]
+        hits = [(move[id(e)] > e['cost_bps']/100) if e['rules'][name] == 'BUY' else (move[id(e)] < -e['cost_bps']/100)
+                for e in trades]
+        rows[name] = {'count': len(subset), 'trades': len(trades),
+                      'avg_net_pct': _avg([_net(e['rules'][name], move[id(e)], e['cost_bps']) for e in subset]),
+                      'ai_same_avg_net_pct': _avg([_net(e['stance'], move[id(e)], e['cost_bps']) for e in subset]),
+                      'hit_rate_pct': _rate(hits)}
+    return rows
+
+
 def summarize(records):
     """Plain numbers for the dashboard: what the AI did versus 'always hold' and 'always buy'."""
     horizons = {}
@@ -92,8 +118,7 @@ def summarize(records):
         buys = [e for e in scored if e['stance'] == 'BUY']
         sells = [e for e in scored if e['stance'] == 'SELL']
         holds = [e for e in scored if e['stance'] == 'HOLD']
-        ai = [(move[id(e)] if e['stance'] == 'BUY' else -move[id(e)] if e['stance'] == 'SELL' else 0)
-              - (e['cost_bps']/100 if e['stance'] in ('BUY', 'SELL') else 0) for e in scored]
+        ai = [_net(e['stance'], move[id(e)], e['cost_bps']) for e in scored]
         always_buy = [move[id(e)]-e['cost_bps']/100 for e in scored]
         picks = []
         for e in scored:
@@ -111,6 +136,7 @@ def summarize(records):
                      'avg_abs_move_pct': _avg([abs(move[id(e)]) for e in holds]),
                      'missed_gain_rate_pct': _rate([move[id(e)] > e['cost_bps']/100 for e in holds])},
             'ai_avg_net_pct': _avg(ai), 'always_hold_pct': 0.0 if scored else None,
+            'rules': _rule_rows(scored, move, key),
             'always_buy_avg_net_pct': _avg(always_buy),
             'selector': {'count': len(picks), 'chosen_abs_move_pct': _avg([p[0] for p in picks]),
                          'others_abs_move_pct': _avg([p[1] for p in picks]),

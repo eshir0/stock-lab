@@ -1,6 +1,8 @@
 import math
+import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -12,6 +14,32 @@ from .instruments import INSTRUMENTS, SYMBOLS
 
 class ProviderError(Exception):
     pass
+
+
+class RateLimited(ProviderError):
+    """Toss answered 429; calls pause until the advertised retry time."""
+
+
+def route_group(path):
+    """Toss meters calls per group, so a 429 in one group must not pause the others (quotes drive exits)."""
+    if path in ('/api/v1/prices', '/api/v1/orderbook'):
+        return 'market-data'
+    if path == '/api/v1/candles':
+        return 'chart'
+    if path == '/api/v1/rankings':
+        return 'ranking'
+    if path.endswith('/investor-trading'):
+        return 'trend'
+    return 'calendar'
+
+
+# The only Toss routes this app may call. Every one is a read-only GET; the single POST is the
+# OAuth token exchange. Order, conditional-order and account routes must never match here.
+READ_ONLY_ROUTES = (
+    re.compile(r'^/api/v1/(prices|orderbook|candles|rankings)$'),
+    re.compile(r'^/api/v1/market-calendar/(KR|US)$'),
+    re.compile(r'^/api/v1/stocks/[A-Za-z0-9.\-]{1,20}/investor-trading$'),
+)
 
 
 def timestamp(value):
@@ -79,6 +107,9 @@ class TossProvider:
         self.token = ''
         self.expires = 0
         self.calendar = {}
+        self.parallel = max(1, min(8, int(getattr(config, 'toss_parallel', 4) or 1)))
+        self.cooldowns = {}     # group -> time until which its calls pause
+        self.rates = {}         # group -> last advertised {limit, remaining, at}
 
     def access_token(self):
         with self.auth_lock:
@@ -100,22 +131,58 @@ class TossProvider:
 
     def get(self, path, params=None):
         # Only explicitly allow-listed read-only API routes. No brokerage order API exists in this app.
-        if path not in ('/api/v1/prices', '/api/v1/orderbook', '/api/v1/candles',
-                        '/api/v1/market-calendar/KR', '/api/v1/market-calendar/US'):
+        if not any(route.match(path) for route in READ_ONLY_ROUTES):
             raise ProviderError('허용되지 않은 조회입니다.')
+        group = route_group(path)
+        if time.time() < self.cooldowns.get(group, 0):
+            raise RateLimited(f'토스 호출 한도({group})에 걸려 잠시 조회를 쉽니다.')
         token = self.access_token()
         try:
             r = self.client.get(self.BASE+path, params=params, headers={'Authorization': 'Bearer '+token})
+            self.note_rate(group, r.headers)
             if r.status_code == 401:
                 with self.auth_lock:
                     self.token = ''
                 raise ProviderError('토스 토큰이 만료 또는 무효화됐습니다. 다음 조회에 다시 인증합니다.')
-            r.raise_for_status()
+            if r.status_code == 429:
+                try:
+                    wait = int(r.headers.get('Retry-After', 1))
+                except (TypeError, ValueError):
+                    wait = 1
+                self.cooldowns[group] = time.time()+min(30, max(1, wait))
+                raise RateLimited(f'토스 호출 한도({group})에 걸렸습니다. 잠시 뒤 다시 조회합니다.')
+            if not 200 <= r.status_code < 300:
+                raise ProviderError(f'토스 시세 조회 실패 [{self.failure_label(r)}]. 합성 시세로 대체하지 않고 거래를 차단합니다.')
             return r.json()['result']
         except ProviderError:
             raise
+        except Exception as exc:
+            raise ProviderError(f'토스 시세 조회 실패 [{type(exc).__name__}]. 합성 시세로 대체하지 않고 거래를 차단합니다.') from None
+
+    @staticmethod
+    def failure_label(response):
+        """HTTP status plus Toss's error code, e.g. 'HTTP 400 unsupported-ranking-duration'. Never the body text."""
+        code = ''
+        try:
+            found = response.json().get('error', {}).get('code')
+            code = found if isinstance(found, str) and len(found) <= 60 and found.replace('-', '').isalnum() else ''
         except Exception:
-            raise ProviderError('토스 시세 조회 실패. 합성 시세로 대체하지 않고 거래를 차단합니다.') from None
+            pass
+        return f'HTTP {response.status_code}'+(' '+code if code else '')
+
+    def note_rate(self, group, headers):
+        """Remember each group's advertised burst size, so parallel reads never exceed their own group's limit."""
+        try:
+            limit = int(headers.get('X-RateLimit-Limit'))
+            remaining = int(headers.get('X-RateLimit-Remaining', limit))
+        except (TypeError, ValueError):
+            return
+        if limit > 0:
+            self.rates[group] = {'limit': limit, 'remaining': max(0, remaining), 'at': time.time()}
+
+    def workers(self, tasks):
+        limit = self.rates.get('market-data', {}).get('limit') or self.parallel
+        return max(1, min(self.parallel, int(limit), tasks))
 
     def session(self, market):
         zone = ZoneInfo('Asia/Seoul' if market == 'KR' else 'America/New_York')
@@ -168,15 +235,40 @@ class TossProvider:
         symbols = tuple(getattr(self, 'quote_symbols', None) or BASE_SYMBOLS)
         prices = self.prices(list(symbols))
         results = {}
-        for symbol in symbols:
+        # Warm the cached session calendar once so worker threads never race to fetch it.
+        for market in sorted({SYMBOLS[symbol]['market'] for symbol in symbols}):
             try:
-                results[symbol] = self.quote(symbol, prices.get(symbol))
+                self.session(market)
             except ProviderError:
-                # No synthetic fallback and no successful timestamp for failed individual quotes.
                 continue
+        workers = self.workers(len(symbols))
+        if workers <= 1:
+            outcomes = [(symbol, self.safe_quote(symbol, prices.get(symbol))) for symbol in symbols]
+        else:
+            # The order book is one call per symbol; reading them in parallel keeps exit monitoring fast.
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [(symbol, pool.submit(self.safe_quote, symbol, prices.get(symbol))) for symbol in symbols]
+                outcomes = [(symbol, future.result()) for symbol, future in futures]
+        for symbol, quote in outcomes:
+            # No synthetic fallback and no successful timestamp for failed individual quotes.
+            if quote is not None:
+                results[symbol] = quote
         if not results:
             raise ProviderError('사용 가능한 토스 호가가 없습니다. 연결 설정과 거래 시간을 확인하세요.')
         return results
+
+    def safe_quote(self, symbol, price):
+        try:
+            return self.quote(symbol, price)
+        except ProviderError:
+            return None
+
+    def rankings(self, country, kind, duration='realtime', count=100):
+        return self.get('/api/v1/rankings', {'type': kind, 'marketCountry': country,
+                                             'duration': duration, 'count': count})
+
+    def investor_trading(self, symbol, count=5):
+        return self.get(f'/api/v1/stocks/{symbol}/investor-trading', {'count': count})
 
     def candles(self, symbol, interval='1d'):
         if interval not in ('1d', '1m'):

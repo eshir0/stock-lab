@@ -1,7 +1,7 @@
 import math
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 def gemini_model_id(value):
@@ -10,6 +10,9 @@ def gemini_model_id(value):
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}', model):
         raise ValueError('GEMINI_MODEL 값이 올바른 모델 ID 형식이 아닙니다. 예: gemini-2.5-flash')
     return model
+
+
+from .live.lock import LiveConfig
 
 
 @dataclass
@@ -31,8 +34,12 @@ class Config:
     bridge_url: str = os.getenv('AI_BRIDGE_URL', '')
     bridge_token: str = os.getenv('AI_BRIDGE_TOKEN', '')
     providers: str = os.getenv('AI_PROVIDERS', 'claude,codex,gemini')
+    # Live-trading readiness: locked in this build; the environment can request it but never enable it.
+    live: LiveConfig = field(default_factory=LiveConfig.from_env)
     ai_daily_calls: int = int(os.getenv('AI_DAILY_CALL_LIMIT', '30'))
     poll_seconds: int = max(5, int(os.getenv('QUOTE_POLL_SECONDS', '10')))
+    # Parallel Toss order-book reads (each symbol needs its own call); clamped to 1-8.
+    toss_parallel: int = max(1, min(8, int(os.getenv('TOSS_PARALLEL', '4'))))
     interval_seconds: int = max(60, int(os.getenv('ANALYSIS_INTERVAL_SECONDS', '900')))
     proposal_seconds: int = 180
     quote_age: int = 30

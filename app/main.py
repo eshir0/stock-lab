@@ -62,6 +62,16 @@ def create_app(config=None, background=True, test=False):
                 pass
             await asyncio.sleep(c.poll_seconds)
 
+    async def intel_loop():
+        while True:
+            try:
+                await asyncio.to_thread(engine.refresh_intel)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            await asyncio.sleep(15)
+
     async def work():
         while True:
             try:
@@ -76,7 +86,8 @@ def create_app(config=None, background=True, test=False):
     async def lifespan(app):
         store.claim_process()
         engine.boot()
-        tasks = [asyncio.create_task(monitor()), asyncio.create_task(work())] if background else []
+        tasks = [asyncio.create_task(monitor()), asyncio.create_task(work()),
+                 asyncio.create_task(intel_loop())] if background else []
         yield
         engine.stop()
         for t in tasks:

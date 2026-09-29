@@ -256,3 +256,45 @@ def test_every_intraday_decision_is_recorded_for_scoring(desk):
     public = desk.public_state()
     assert public['evaluation']['decisions'] == 1 and public['evaluation']['pending'] == 1
     assert 'candidates' not in public['evaluations'][-1]
+
+
+def test_paper_proposals_leave_shadow_records_and_never_a_live_order(desk):
+    desk.set_execution('auto')
+    desk.start()
+    desk.cycle()
+    state = desk.store.read()
+    shadow_order = state['shadow_orders'][-1]
+    assert shadow_order['side'] == 'BUY' and shadow_order['source'] == 'ai' and shadow_order['sim_status'] == 'filled'
+    assert shadow_order['symbol'] == state['runs'][-1]['symbol'] and shadow_order['order_type'] == 'LIMIT'
+    assert 'protective' in shadow_order and isinstance(shadow_order['would_submit'], bool)
+    position = state['positions'][shadow_order['symbol']]
+    desk.provider.price = position['stop_price']-1
+    desk.process_desk_exits()
+    exit_record = desk.store.read()['shadow_orders'][-1]
+    assert exit_record['side'] == 'SELL' and exit_record['source'] == 'exit'
+    public = desk.public_state()
+    assert 'shadow_orders' not in public and public['live']['config']['locked'] is True
+    assert public['live']['shadow']['total'] == 2 and public['live']['config']['enabled'] is False
+
+
+def test_a_shadow_failure_never_interrupts_paper_trading(desk, monkeypatch):
+    import app.desk as desk_module
+
+    def broken(*args, **kwargs):
+        raise RuntimeError('shadow exploded')
+    monkeypatch.setattr(desk_module, 'record_shadow', broken)
+    desk.set_execution('auto')
+    desk.start()
+    desk.cycle()
+    state = desk.store.read()
+    assert state['runs'][-1]['status'] == 'completed' and state['proposals'][-1]['status'] == 'filled'
+    assert state['positions'] and any('그림자 기록에 실패' in e['message'] for e in state['events'])
+
+
+def test_shadow_can_be_switched_off(desk):
+    from dataclasses import replace
+    desk.c.live = replace(desk.c.live, shadow=False)
+    desk.set_execution('auto')
+    desk.start()
+    desk.cycle()
+    assert 'shadow_orders' not in desk.store.read() and desk.store.read()['positions']
