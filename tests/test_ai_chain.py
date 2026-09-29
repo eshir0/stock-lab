@@ -118,3 +118,14 @@ def test_provider_order_skips_unconfigured(agent):
     assert agent.c.provider_order == ['gemini'] and agent.c.gemini_only
     agent.c.bridge_token, agent.c.gemini_key = 't'*40, ''
     assert agent.c.provider_order == ['claude', 'codex'] and not agent.c.gemini_only
+
+
+def test_selector_rejects_symbols_outside_candidates(agent, monkeypatch):
+    ctx = {'reports': [], 'strategy_mode': 'intraday', 'candidates': [{'symbol': 'AAPL'}, {'symbol': 'MSFT'}]}
+    pick = lambda sym: {'ok': True, 'data': {'symbol': sym, 'summary': '이유', 'risks': [],
+                                             'ranking': [{'symbol': sym, 'reason': 'r'}, {'symbol': 'NVDA', 'reason': 'x'}]}}
+    calls = fake_post(monkeypatch, {'claude': pick('NVDA'), 'codex': pick('MSFT')})
+    result = agent.run('selector', ctx, 1)
+    assert calls == ['claude', 'codex']
+    assert result['symbol'] == 'MSFT' and result['stance'] == 'HOLD' and result['quantity'] == 0
+    assert [x['symbol'] for x in result['ranking']] == ['MSFT']

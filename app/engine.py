@@ -7,6 +7,8 @@ from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone
 
 from .agents import Agents, DESK_ROLES, market_context
+from .desk import DESK_CALLS
+from .evaluation import summarize, update_outcomes
 from .config import ROLES
 from .instruments import INSTRUMENTS, SYMBOLS
 from .desk import DeskMixin
@@ -144,6 +146,7 @@ class Engine(DeskMixin):
             if any(x['status'] == 'running' for x in s['runs']):
                 raise RuleError('현재 분석이 끝난 뒤 요청하세요.')
             s['cursor'] = symbols.index(symbol)
+            s['requested_symbol'] = symbol
             s['next_run'] = time.time()
 
     def refresh(self):
@@ -165,6 +168,7 @@ class Engine(DeskMixin):
                         p['status'] = 'expired'
                 record_performance(s, now=now, quote_age=self.c.quote_age)
                 self.update_desk_risk(s, now=now)
+                update_outcomes(s, now, self.c.quote_age)
         except Exception as e:
             message = str(e) if isinstance(e, ProviderError) else '시세 갱신 실패. 최신 시세를 받을 때까지 거래를 차단합니다.'
             with self.store.edit() as s:
@@ -407,6 +411,7 @@ class Engine(DeskMixin):
                 if not s['running'] or s['generation'] != gen:
                     return
                 s['cursor'] = index+1
+                s.pop('requested_symbol', None)
                 rev = s['revision']
                 s['next_run'] = time.time()+self.c.interval_seconds
                 s['scheduler_status'] = SYMBOLS[symbol]['name']+' 분석 중'
@@ -495,6 +500,9 @@ class Engine(DeskMixin):
             s['history'] = history[::math.ceil(len(history)/999)]
             if s['history'][-1] != history[-1]:
                 s['history'].append(history[-1])
+        evaluations = s.get('evaluations', [])
+        s['evaluation'] = summarize(evaluations)
+        s['evaluations'] = [{k: v for k, v in e.items() if k != 'candidates'} for e in evaluations[-30:]]
         s['trades_count'] = len(s['trades'])
         s['trades'] = s['trades'][-100:]
         s['server_time'] = time.time()
@@ -505,5 +513,5 @@ class Engine(DeskMixin):
                        'fee_kr_bps': self.c.fee_kr, 'fee_us_bps': self.c.fee_us,
                        'sell_tax_kr_bps': self.c.sell_tax_kr, 'slippage_bps': self.c.slippage_bps,
                        'roles': [{'id': role, 'name': name} for role, name in (DESK_ROLES if s.get('strategy_mode') == 'intraday' else ROLES)],
-                       'analysis_calls_per_cycle': len(DESK_ROLES) if s.get('strategy_mode') == 'intraday' else len(ROLES)}
+                       'analysis_calls_per_cycle': DESK_CALLS if s.get('strategy_mode') == 'intraday' else len(ROLES)}
         return s

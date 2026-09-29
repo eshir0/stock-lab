@@ -125,7 +125,8 @@ def test_demo_intraday_research_fill_exit_and_ledger(desk, mode):
     run = state['runs'][-1]
     assert run['status'] == 'completed'
     assert [report['role'] for report in run['reports']] == [
-        'planner', 'fundamental', 'technical', 'news', 'critic', 'director']
+        'selector', 'planner', 'fundamental', 'technical', 'news', 'critic', 'director']
+    assert run['selected_by'] == 'ai' and run['reports'][0]['symbol'] == run['symbol'] == '005930'
     entry = state['proposals'][-1]
     assert entry['side'] == 'BUY' and type(entry['quantity']) is int and entry['quantity'] > 0
     assert entry['sizing']['estimated_stop_risk'] <= 1000000*.005
@@ -168,3 +169,90 @@ def test_demo_intraday_research_fill_exit_and_ledger(desk, mode):
             assert restored[key] == state[key]
     finally:
         reopened.release()
+
+
+def test_ai_selector_choice_drives_the_cycle(desk, monkeypatch):
+    original = desk.agents.run
+    seen = {}
+    def run(role, context, generation):
+        if role == 'selector':
+            seen['candidates'] = [c['symbol'] for c in context['candidates']]
+            seen['fields'] = set(context['candidates'][0])
+            return dict(original(role, context, generation), symbol='000660')
+        return original(role, context, generation)
+    monkeypatch.setattr(desk.agents, 'run', run)
+    desk.start()
+    desk.cycle()
+    run_record = desk.store.read()['runs'][-1]
+    assert len(seen['candidates']) > 1 and '000660' in seen['candidates']
+    assert {'spread_bps', 'return_20m_pct', 'volatility_1m_pct', 'position_quantity'} <= seen['fields']
+    assert run_record['symbol'] == '000660' and run_record['selected_by'] == 'ai'
+
+
+def test_user_requested_symbol_skips_ai_selection(desk, monkeypatch):
+    original = desk.agents.run
+    roles = []
+    monkeypatch.setattr(desk.agents, 'run', lambda role, c, g: roles.append(role) or original(role, c, g))
+    desk.start()
+    desk.request_cycle('000660')
+    desk.cycle()
+    state = desk.store.read()
+    assert 'selector' not in roles
+    assert state['runs'][-1]['symbol'] == '000660' and state['runs'][-1]['selected_by'] == 'user'
+    assert 'requested_symbol' not in state
+
+
+def test_selector_failure_falls_back_to_rotation(desk, monkeypatch):
+    original = desk.agents.run
+    def run(role, context, generation):
+        if role == 'selector':
+            raise ProviderError('[Claude 실패] x')
+        return original(role, context, generation)
+    monkeypatch.setattr(desk.agents, 'run', run)
+    desk.start()
+    desk.cycle()
+    state = desk.store.read()
+    assert state['runs'][-1]['status'] == 'completed' and state['runs'][-1]['selected_by'] == 'server'
+    assert any('AI 종목 선정 실패' in e.get('message', '') for e in state['events'])
+
+
+def test_selection_compares_one_market_at_a_time(desk, monkeypatch):
+    original = desk.agents.run
+    seen = []
+    def run(role, context, generation):
+        if role == 'selector':
+            seen.append((context['market'], {desk_symbols()[c['symbol']] for c in context['candidates']},
+                         context['currency'], context['portfolio']['cash']))
+        return original(role, context, generation)
+    monkeypatch.setattr(desk.agents, 'run', run)
+    desk.start()
+    desk.cycle()
+    first = desk.store.read()
+    with desk.store.edit() as state:
+        state['next_run'] = 0
+    desk.cycle()
+    second = desk.store.read()
+    (m1, markets1, cur1, cash1), (m2, markets2, cur2, cash2) = seen
+    assert markets1 == {m1} and markets2 == {m2} and m1 != m2
+    assert {cur1, cur2} == {'KRW', 'USD'} and cash1 == first['cash'][cur1] and cash2 == second['cash'][cur2]
+    assert first['last_market'] == m1 and second['last_market'] == m2
+    assert second['runs'][-1]['reports'][0]['name'].endswith(('(국내)', '(미국)'))
+
+
+def desk_symbols():
+    from app.instruments import SYMBOLS
+    return {k: v['market'] for k, v in SYMBOLS.items()}
+
+
+def test_every_intraday_decision_is_recorded_for_scoring(desk):
+    desk.set_execution('auto')
+    desk.start()
+    desk.cycle()
+    state = desk.store.read()
+    record = state['evaluations'][-1]
+    assert record['run_id'] == state['runs'][-1]['id'] and record['stance'] == 'BUY'
+    assert record['action'] == 'filled' and record['selected_by'] == 'ai' and record['cost_bps'] >= 40
+    assert record['candidates'] and record['symbol'] not in record['candidates']
+    public = desk.public_state()
+    assert public['evaluation']['decisions'] == 1 and public['evaluation']['pending'] == 1
+    assert 'candidates' not in public['evaluations'][-1]

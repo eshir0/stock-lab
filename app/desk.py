@@ -7,13 +7,51 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from .agents import DESK_ROLES, market_context
+from .agents import DESK_ROLES, STOPPED, market_context
 from .config import INSTRUMENTS as BASE_INSTRUMENTS
 from .instruments import INSTRUMENTS, SYMBOLS
+from .evaluation import mid, record_decision
 from .performance import performance_summary
 from .providers import ProviderError
 from .risk import RiskError, size_order
 from .store import event
+
+MARKET_LABELS = {'KR': '국내', 'US': '미국'}
+DESK_CALLS = len(DESK_ROLES)+1  # stock selection + six research roles
+
+
+def _pct(new, old):
+    return round((new/old-1)*100, 3) if old else None
+
+
+def candidate_summary(symbol, quote, candles, state, limits, now):
+    """Compact, server-computed facts per candidate so the selector compares like with like."""
+    closes = [c['close'] for c in candles]
+    moves = [math.log(b/a) for a, b in zip(closes[-21:], closes[-20:]) if a > 0 and b > 0]
+    mean = sum(moves)/len(moves) if moves else 0
+    volumes = [c['volume'] for c in candles]
+    prior = volumes[-25:-5]
+    mid = (quote['ask']+quote['bid'])/2
+    position = state['positions'].get(symbol, {})
+    runs = [r for r in state.get('runs', []) if r.get('symbol') == symbol and r.get('status') == 'completed']
+    last = runs[-1] if runs else None
+    decision = next((r for r in reversed(last['reports']) if r.get('role') == 'director'), None) if last else None
+    item = SYMBOLS[symbol]
+    return {'symbol': symbol, 'name': item['name'], 'market': item['market'], 'currency': item['currency'],
+            'leveraged_etf': item.get('leveraged_etf', False), 'leverage_factor': item.get('leverage_factor', 1),
+            'underlying': item.get('underlying', ''), 'last': closes[-1], 'bid': quote['bid'], 'ask': quote['ask'],
+            'spread_bps': round((quote['ask']-quote['bid'])/mid*10000, 2) if mid else None,
+            'return_5m_pct': _pct(closes[-1], closes[-6]) if len(closes) > 5 else None,
+            'return_20m_pct': _pct(closes[-1], closes[-21]) if len(closes) > 20 else None,
+            'return_60m_pct': _pct(closes[-1], closes[-61]) if len(closes) > 60 else None,
+            'volatility_1m_pct': round(math.sqrt(sum((x-mean)**2 for x in moves)/len(moves))*100, 4) if moves else None,
+            'volume_ratio_5m': round(sum(volumes[-5:])/5/(sum(prior)/len(prior)), 3) if prior and sum(prior) > 0 else None,
+            'session_minutes_left': int((quote['session_end']-now)//60),
+            'position_quantity': position.get('quantity', 0),
+            'position_unrealized_pct': _pct(quote['bid'], position['average']) if position.get('average') else None,
+            'max_buy_quantity': limits['max_buy_quantity'], 'max_sell_quantity': limits['max_sell_quantity'],
+            'last_analyzed_minutes_ago': int((now-last['time'])//60) if last else None,
+            'last_decision': decision.get('stance') if decision else None}
 
 
 class DeskMixin:
@@ -170,12 +208,12 @@ class DeskMixin:
     def desk_cycle(self, snapshot, run_id):
         gen, now = snapshot['generation'], time.time()
         day = datetime.fromtimestamp(now, timezone.utc).date().isoformat()
-        if self.c.mode != 'demo' and self.c.gemini_only and self.c.ai_daily_calls-snapshot['daily_ai'].get(day, 0) < len(DESK_ROLES):
-            self.wait_for_cycle(gen, 'AI 호출 한도 대기 · 기획·전문가·검토·최종결정 6회 호출이 필요합니다.',
+        if self.c.mode != 'demo' and self.c.gemini_only and self.c.ai_daily_calls-snapshot['daily_ai'].get(day, 0) < DESK_CALLS:
+            self.wait_for_cycle(gen, 'AI 호출 한도 대기 · 종목 선정·기획·전문가·검토·최종결정 7회 호출이 필요합니다.',
                                 (int(now)//86400+1)*86400+1)
             return
         symbols = [i['symbol'] for i in self.active_instruments(snapshot)]
-        selected, message = None, '정규장·최신 호가·거래 가능한 수량을 기다립니다.'
+        candidates, message = [], '정규장·최신 호가·거래 가능한 수량을 기다립니다.'
         for offset in range(len(symbols)):
             index = (snapshot['cursor']+offset) % len(symbols)
             symbol = symbols[index]
@@ -198,24 +236,58 @@ class DeskMixin:
                 if any(b['time']-a['time'] > 180 for a, b in zip(candles[-20:], candles[-19:])):
                     message = '분봉에 큰 공백이 있어 단기 분석을 보류합니다.'
                     continue
-                selected = symbol, index, q, candles
-                break
+                candidates.append((symbol, index, q, candles, limits))
             except (ValueError, ProviderError, KeyError) as exc:
                 message = str(exc)
-        if selected is None:
+        if not candidates:
             self.wait_for_cycle(gen, message)
             return
-        symbol, index, quote, candles = selected
+        selection = None
+        requested = snapshot.get('requested_symbol')
+        chosen = next((c for c in candidates if c[0] == requested), None)
+        # Korean and US names are never compared with each other: pick a market first, then a stock in it.
+        markets = sorted({SYMBOLS[c[0]]['market'] for c in candidates})
+        market = SYMBOLS[chosen[0]]['market'] if chosen else (
+            next((m for m in markets if m != snapshot.get('last_market')), markets[0]))
+        market_pool = [c for c in candidates if SYMBOLS[c[0]]['market'] == market]
+        label = MARKET_LABELS.get(market, market)
+        if chosen is None and len(market_pool) > 1:
+            with self.store.edit() as s:
+                if not s['running'] or s['generation'] != gen:
+                    return
+                s['scheduler_status'] = f'메인 디렉터가 {label} 후보 {len(market_pool)}개 중 분석할 종목을 고릅니다.'
+            currency = SYMBOLS[market_pool[0][0]]['currency']
+            risk = snapshot.get('risk_status', {})
+            ctx = {'strategy_mode': 'intraday', 'as_of_utc': datetime.now(timezone.utc).isoformat(), 'reports': [],
+                   'market': market, 'market_name': label, 'currency': currency,
+                   'strategy_settings': snapshot['strategy_settings'],
+                   'portfolio': {'cash': snapshot['cash'][currency],
+                                 'day_pnl_pct': (risk.get('day_pnl_pct') or {}).get(currency)},
+                   'candidates': [candidate_summary(c[0], c[2], c[3], snapshot, c[4], now) for c in market_pool]}
+            try:
+                selection = self.agents.run('selector', ctx, gen)
+                selection.update(role='selector', name=f'메인 디렉터 · 종목 선정 ({label})', time=time.time())
+                chosen = next(c for c in market_pool if c[0] == selection['symbol'])
+            except ProviderError as exc:
+                if str(exc) == STOPPED:
+                    return
+                with self.store.edit() as s:
+                    event(s, f'{label} AI 종목 선정 실패로 순서대로 선택합니다: '+str(exc)[:300], 'warning')
+        symbol, index, quote, candles, _ = chosen or market_pool[0]
         with self.store.edit() as s:
             if not s['running'] or s['generation'] != gen:
                 return
             s['cursor'], s['next_run'] = index+1, time.time()+self.c.interval_seconds
+            s.pop('requested_symbol', None)
+            s['last_market'] = SYMBOLS[symbol]['market']
             s['quotes'][symbol] = quote
             self.update_desk_risk(s)
             rev = s['revision']
             s['scheduler_status'] = SYMBOLS[symbol]['name']+' · 디렉터가 조사 업무를 배정합니다.'
             s['runs'].append({'id': run_id, 'symbol': symbol, 'time': time.time(), 'status': 'running',
-                              'reports': [], 'execution_mode': s['execution_mode'], 'strategy_mode': 'intraday'})
+                              'reports': [selection] if selection else [], 'execution_mode': s['execution_mode'],
+                              'strategy_mode': 'intraday', 'selected_by': 'ai' if selection else
+                              ('user' if symbol == requested else 'server')})
             account = copy.deepcopy(s)
         context = market_context(symbol, quote, candles, account)
         context.update(strategy_mode='intraday', candle_interval='1m', intraday_candles=candles, strategy_settings=account['strategy_settings'],
@@ -267,6 +339,14 @@ class DeskMixin:
             run = next(x for x in s['runs'] if x['id'] == run_id)
             run['status'] = 'completed'
             s['scheduler_status'] = '조사·반대 검토·최종 판단 완료 · 청산 규칙은 별도로 감시합니다.'
+            currency = SYMBOLS[symbol]['currency']
+            fee = self.c.fee_kr if currency == 'KRW' else self.c.fee_us
+            spread = (fresh['ask']-fresh['bid'])/mid(fresh)*10000 if mid(fresh) else 0
+            scorecard = record_decision(
+                s, run_id=run_id, symbol=symbol, market=SYMBOLS[symbol]['market'], decision=decision, quote=fresh,
+                candidates={c[0]: mid(c[2]) for c in market_pool if c[0] != symbol} if selection else {},
+                selected_by=run.get('selected_by', 'server'), now=time.time(),
+                cost_bps=2*fee+2*self.c.slippage_bps+(self.c.sell_tax_kr if currency == 'KRW' else 0)+spread)
             if decision['stance'] == 'HOLD' or s['revision'] != rev:
                 event(s, SYMBOLS[symbol]['name']+' · 관망 또는 계좌 변경으로 체결하지 않습니다.')
                 return
@@ -302,7 +382,11 @@ class DeskMixin:
                         if p['status'] == 'pending':
                             p['status'] = 'invalidated'
                 s['proposals'].append(proposal)
+                if scorecard:
+                    scorecard['action'] = proposal['status']
                 event(s, f'{SYMBOLS[symbol]["name"]} 목표 비중·손절 위험으로 {sizing["quantity"]}주 산정 · '+('자동 체결' if s['execution_mode'] == 'auto' else '승인 대기'))
             except (RiskError, ProviderError, ValueError) as exc:
                 run['blocked'] = str(exc)
+                if scorecard:
+                    scorecard['action'] = 'blocked'
                 event(s, '위험 검토에서 체결을 보류했습니다: '+str(exc), 'warning')

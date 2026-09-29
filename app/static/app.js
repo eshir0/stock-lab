@@ -7,7 +7,7 @@ const stamp = t => finite(t) && t > 0 ? new Date(t * 1000) : null;
 const clock = t => stamp(t)?.toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}) || '—';
 const dateTime = t => stamp(t)?.toLocaleString('ko-KR',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}) || '기록 없음';
 const percent = x => finite(x) ? (x >= 0 ? '+' : '') + x.toFixed(2) + '%' : '—';
-const names = {planner:'플래너',fundamental:'기업 분석가',technical:'차트 분석가',news:'뉴스 분석가',critic:'반대 검토자',director:'디렉터'};
+const names = {selector:'종목 선정',planner:'플래너',fundamental:'기업 분석가',technical:'차트 분석가',news:'뉴스 분석가',critic:'반대 검토자',director:'디렉터'};
 const exitNames = {stop_loss:'손절 기준 도달',take_profit:'익절 기준 도달',time_stop:'보유 기한 도달',time_exit:'보유 기한 도달',max_holding:'보유 기한 도달',expiry:'보유 기한 도달',daily_loss_limit:'일중 손실 한도',director:'디렉터 매도 의견',liquidation:'전량 모의매도'};
 const safeUrl = value => { try { const url = new URL(value); return ['https:','http:'].includes(url.protocol) ? url.href : null; } catch { return null; } };
 const roleList = s => Array.isArray(s.config.roles) && s.config.roles.length ? s.config.roles : Object.entries(names).filter(([id]) => s.strategy_mode === 'intraday' || id !== 'planner').map(([id,name]) => ({id,name}));
@@ -257,6 +257,7 @@ function render() {
   }
   renderDecisions(s,now,auto);
   renderTeam(s);
+  renderEvaluation(s);
   $('positions').innerHTML = Object.entries(s.positions).map(([symbol,p]) => {
     const i = s.instruments.find(i => i.symbol === symbol), q = s.quotes[symbol], pnl = q ? q.last * p.quantity - (p.cost_basis ?? p.average * p.quantity) : null;
     const currency = i?.currency || p.currency;
@@ -293,6 +294,7 @@ function sizingDetails(sizing,currency) {
 }
 function reportExtras(report) {
   let html = '';
+  if (report.role === 'selector' && Array.isArray(report.ranking) && report.ranking.length) html += '<div class="briefing"><h4>후보 순위</h4><dl>' + report.ranking.map((item, index) => `<div><dt>${index + 1}. ${esc(item.symbol)}${item.symbol === report.symbol ? ' ✓' : ''}</dt><dd>${esc(item.reason)}</dd></div>`).join('') + '</dl></div>';
   if (Array.isArray(report.tasks) && report.tasks.length) html += '<div class="briefing"><h4>역할별 조사 지시</h4><dl>' + report.tasks.map(task => `<div><dt>${esc(names[task.role] || task.role)}</dt><dd>${esc(task.instruction)}</dd></div>`).join('') + '</dl></div>';
   if (Array.isArray(report.evidence) && report.evidence.length) {
     const retrieved = new Set((report.sources || []).map(source => safeUrl(source.url)).filter(Boolean));
@@ -310,6 +312,23 @@ function searchEntryFrame(run, report) {
   // Provider HTML is only served inside the endpoint's CSP-sandboxed document.
   return `<iframe class="search-entry" src="${esc(src)}" title="Google 검색 제안" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer" loading="lazy"></iframe>`;
 }
+function renderEvaluation(s) {
+  const ev = s.evaluation, list = s.evaluations || [];
+  if (!ev) return;
+  const signed = x => finite(x) ? `<span class="${x > 0 ? 'up' : x < 0 ? 'down' : ''}">${x > 0 ? '+' : ''}${x.toFixed(2)}%</span>` : '—';
+  const rate = x => finite(x) ? `${x.toFixed(0)}%` : '—';
+  $('eval-sample').textContent = `판단 ${ev.decisions}건 · 채점 대기 ${ev.pending}건`;
+  const rows = ['30', '60'].map(h => {
+    const x = ev.horizons[h];
+    return `<tr><th>${h}분 뒤</th><td>${x.scored}</td><td>${signed(x.ai_avg_net_pct)}</td><td>${signed(x.always_hold_pct)}</td><td>${signed(x.always_buy_avg_net_pct)}</td><td>${x.buy.count}건 · ${signed(x.buy.avg_net_pct)} · 적중 ${rate(x.buy.hit_rate_pct)}</td><td>${x.sell.count}건 · 회피 ${signed(x.sell.avg_avoided_pct)} · 적중 ${rate(x.sell.hit_rate_pct)}</td><td>${x.hold.count}건 · 놓친 상승 ${rate(x.hold.missed_gain_rate_pct)}</td><td>${x.selector.count ? `${signed(x.selector.chosen_abs_move_pct)} vs ${signed(x.selector.others_abs_move_pct)} · 더 큰 움직임 ${rate(x.selector.bigger_mover_rate_pct)}` : '—'}</td></tr>`;
+  }).join('');
+  const engines = Object.entries(ev.engines).map(([name, x]) => `${esc(name)} ${x.decisions}건`).join(' · ') || '—';
+  $('eval-summary').innerHTML = `<div class="table-wrap"><table class="eval-table"><thead><tr><th>기준</th><th>채점</th><th>AI 판단(비용 차감)</th><th>항상 관망</th><th>매번 매수</th><th>매수</th><th>매도</th><th>관망</th><th>종목 선정(변동폭)</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    + `<p class="small muted eval-note">${ev.enough_sample ? '' : `⚠ 60분 채점 ${ev.min_sample}건 미만: 운과 실력을 구분하기 어려운 표본입니다. `}AI 판단 = 매수는 수익률, 매도는 하락 회피, 관망은 0%로 계산한 평균입니다. 판단 AI: ${engines}</p>`;
+  const stance = {BUY:'매수',SELL:'매도',HOLD:'관망'}, by = {ai:'AI',user:'직접',server:'순서'};
+  const cell = (e, h) => { const o = e.outcomes[h]; if (!o) return '<span class="muted">대기</span>'; if (o.missed) return '<span class="muted">누락</span>'; return signed(o.returns?.[e.symbol]) + (o.at_close ? ' <span class="muted small">마감</span>' : ''); };
+  $('eval-recent').innerHTML = list.slice().reverse().map(e => `<tr><td>${clock(e.time)}</td><td>${esc(e.symbol)}</td><td>${stance[e.stance] || esc(e.stance)}</td><td>${by[e.selected_by] || esc(e.selected_by)}</td><td>${esc(e.engine.split(' · ')[0])}</td><td>${esc(e.action)}</td><td>${cell(e, '30')}</td><td>${cell(e, '60')}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">아직 기록된 판단이 없습니다.</td></tr>';
+}
 function renderTeam(s) {
   const run = s.runs.at(-1), roles = roleList(s), intraday = s.strategy_mode === 'intraday';
   $('research-flow').textContent = intraday ? '플래너가 조사 지시 → 기업·차트·뉴스 분석가가 병렬 조사 → 반대 검토자가 약점 확인 → 디렉터가 매매 계획 결정' : '기업·차트·뉴스 분석 → 반대 검토 → 디렉터의 매매 의견';
@@ -325,7 +344,7 @@ function renderTeam(s) {
   if (reportKey !== nextKey) {
     const opened = new Set([...$('reports').querySelectorAll('details[open]')].map(d => d.dataset.role));
     reportKey = nextKey;
-    $('reports').innerHTML = (run?.reports || []).map(r => `<details data-role="${esc(r.role)}" ${opened.has(r.role) || r.role === 'director' || r.role === 'planner' ? 'open' : ''}><summary>${esc(r.name || names[r.role])} · ${r.role === 'planner' ? '조사 브리핑' : esc(({BUY:'매수 의견',SELL:'매도 의견',HOLD:'관망 의견'})[r.stance] || '분석 보고서')}</summary><div class="report-body"><p>${esc(r.summary)}</p>${reportExtras(r)}<ul>${(r.risks || []).map(x => `<li>${esc(x)}</li>`).join('')}</ul>${(r.sources || []).filter(x => safeUrl(x.url)).map(x => `<a href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener noreferrer">${esc(x.title || x.url)} ↗</a>`).join('')}${searchEntryFrame(run,r)}<div class="report-model">${esc(r.engine)} · ${clock(r.time)}${r.usage?.total_tokens ? ' · ' + Number(r.usage.total_tokens).toLocaleString() + ' tokens' : ''}</div></div></details>`).join('') + (run?.error ? `<div class="notice error">${esc(run.error)}</div>` : '') + (run?.blocked ? `<div class="notice">${esc(run.blocked)}</div>` : '');
+    $('reports').innerHTML = (run?.reports || []).map(r => `<details data-role="${esc(r.role)}" ${opened.has(r.role) || r.role === 'director' || r.role === 'planner' || r.role === 'selector' ? 'open' : ''}><summary>${esc(r.name || names[r.role])} · ${r.role === 'selector' ? '선정 · ' + esc(r.symbol) : r.role === 'planner' ? '조사 브리핑' : esc(({BUY:'매수 의견',SELL:'매도 의견',HOLD:'관망 의견'})[r.stance] || '분석 보고서')}</summary><div class="report-body"><p>${esc(r.summary)}</p>${reportExtras(r)}<ul>${(r.risks || []).map(x => `<li>${esc(x)}</li>`).join('')}</ul>${(r.sources || []).filter(x => safeUrl(x.url)).map(x => `<a href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener noreferrer">${esc(x.title || x.url)} ↗</a>`).join('')}${searchEntryFrame(run,r)}<div class="report-model">${esc(r.engine)} · ${clock(r.time)}${r.usage?.total_tokens ? ' · ' + Number(r.usage.total_tokens).toLocaleString() + ' tokens' : ''}</div></div></details>`).join('') + (run?.error ? `<div class="notice error">${esc(run.error)}</div>` : '') + (run?.blocked ? `<div class="notice">${esc(run.blocked)}</div>` : '');
   }
 }
 function drawChart() {

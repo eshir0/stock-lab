@@ -107,3 +107,9 @@
 @media(max-width:780px){.strategy-summary{flex-direction:column;gap:8px}.trade-plan{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:440px){.team.six-roles{grid-template-columns:repeat(2,minmax(0,1fr))}.risk-inputs{grid-template-columns:1fr;gap:0}.strategy-fields{padding:12px}.briefing dl>div{grid-template-columns:1fr;gap:3px}.risk-day{gap:8px 12px}.evidence article{padding:10px}.sizing-summary{padding:13px}.etf-tag{display:table;margin:5px 0 0}.watchrow .ticker{margin:4px 0 0;display:block}}
 
+
+/* AI decision scorecard. */
+.eval-panel{margin-top:22px}
+.eval-table th,.eval-table td{white-space:nowrap;font-size:.8125rem}
+.eval-note{margin:10px 0 16px;line-height:1.7}
+.eval-panel .up{color:var(--red)}.eval-panel .down{color:var(--blue)}
