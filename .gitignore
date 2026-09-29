@@ -10,3 +10,6 @@ backups/
 __pycache__/
 .pytest_cache/
 *.pyc
+
+# design-lab 출력
+shots/

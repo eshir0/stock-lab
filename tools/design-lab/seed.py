@@ -1,0 +1,81 @@
+"""Build a realistic demo ledger through the app's own engine (demo mode, isolated SQLite in /tmp)."""
+import random
+import time
+
+from app.config import Config
+from app.engine import Engine
+from app.evaluation import record_decision
+from app.providers import DemoProvider
+from app.rules import RULES
+from app.store import Store
+from lab_common import seed_intel
+
+random.seed(11)
+cfg = Config(database_url='sqlite:////tmp/demo.db', mode='demo', password='demo-password-12345', session_secret='x'*40,
+             toss_id='', toss_secret='', gemini_key='')
+store = Store(cfg.database_url, cfg.mode)
+engine = Engine(cfg, store, DemoProvider())
+engine.boot()
+engine.new_experiment(1000000, 1000, '장중 매매 실험 2차', 30, 'intraday',
+                      {'include_leveraged_etfs': True, 'risk_per_trade_pct': .5, 'daily_loss_limit_pct': 2, 'max_holding_minutes': 120})
+engine.refresh()
+seed_intel(engine)
+engine.set_execution('auto')
+engine.start()
+for symbol in ('005930', 'AAPL', '000660', 'TQQQ', '005930', None, None):
+    if symbol:
+        engine.request_cycle(symbol)
+    else:
+        with store.edit() as s:
+            s['next_run'] = time.time()
+    engine.cycle()
+    time.sleep(.3)
+
+now = time.time()
+symbols = ['AAPL', 'MSFT', 'TQQQ', 'SQQQ', '005930', '000660']
+with store.edit() as s:
+    # Equity history: three hours of gently rising, noisy curves.
+    history, krw, usd = [], 1000000.0, 1000.0
+    for i in range(180):
+        t = now-(179-i)*60
+        krw *= 1+random.gauss(.00006, .0009)
+        usd *= 1+random.gauss(.00004, .0011)
+        history.append({'time': t, 'KRW': round(krw, 2), 'USD': round(usd, 2), 'fresh': {'KRW': True, 'USD': True}})
+    s['history'] = history
+    s['daily_ai'] = {time.strftime('%Y-%m-%d', time.gmtime(now)): 14}
+    s['events'].insert(0, {'time': now-5400, 'message': 'AI 종목 선정 실패로 순서대로 선택합니다: [Claude 사용량 소진] 대기 중', 'level': 'warning'})
+    # Scored decisions: a plausible mix of stances, engines, outcomes and rule signals.
+    picks = ['BUY']*8+['HOLD']*13+['SELL']*4+['BUY']*3
+    engines = ['Claude · claude-opus-5-5']*16+['Codex · gpt-6-sol']*6+['gemini-3.5-flash']*4
+    for i in range(26):
+        symbol, stance = random.choice(symbols), picks[i]
+        market = 'KR' if symbol[0].isdigit() else 'US'
+        t = now-(26-i)*11*60-3600
+        price = 100.0
+        quote = {'bid': price, 'ask': price, 'asof': t, 'received': t, 'session_end': now+3600}
+        pool = [x for x in symbols if (x[0].isdigit()) == (market == 'KR') and x != symbol]
+        others = {x: price for x in random.sample(pool, k=min(2, len(pool)))}
+        rules = {name: random.choice(['BUY', 'SELL', 'HOLD', 'HOLD', None]) for name in RULES}
+        entry = record_decision(s, run_id=f'seed-{i}', symbol=symbol, market=market,
+                                decision={'stance': stance, 'engine': engines[i], 'target_weight_pct': 10}, quote=quote,
+                                candidates=others, selected_by=random.choice(['ai', 'ai', 'ai', 'user', 'server']), cost_bps=38+random.random()*10,
+                                now=t, rules=rules)
+        entry['action'] = {'BUY': random.choice(['filled', 'filled', 'blocked']), 'SELL': 'filled', 'HOLD': 'hold'}[stance]
+        if i < 23:
+            drift = random.gauss(.03, .18)
+            for horizon in (30, 60):
+                returns = {x: round(random.gauss(drift*horizon/30, .55), 4) for x in [symbol, *others]}
+                entry['outcomes'][str(horizon)] = {'time': t+horizon*60, 'at_close': False, 'returns': returns}
+    # A few shadow orders that would have been blocked, for the readiness panel.
+    for i, (sym, cur, side, qty, price, blocked) in enumerate([
+            ('005930', 'KRW', 'BUY', 4, 70100, ['max-order', 'max-daily-notional']), ('TQQQ', 'USD', 'BUY', 1, 76.8, ['symbol-not-allowed']),
+            ('AAPL', 'USD', 'BUY', 1, 201.3, []), ('AAPL', 'USD', 'SELL', 1, 201.9, []), ('000660', 'KRW', 'BUY', 1, 182300, [])]):
+        s.setdefault('shadow_orders', []).append({
+            'time': now-(6-i)*380, 'symbol': sym, 'market': 'KR' if cur == 'KRW' else 'US', 'currency': cur, 'side': side, 'quantity': qty,
+            'order_type': 'LIMIT', 'limit_price': str(price), 'notional': str(round(price*qty, 2)), 'source': 'exit' if side == 'SELL' else 'ai',
+            'proposal_id': f'seed-{i}', 'would_submit': not blocked, 'blocked_by': blocked, 'suggested_quantity': 1 if blocked and blocked[0] == 'max-order' else 0,
+            'protective': {'stop_trigger': str(round(price*.985, 2)), 'take_profit_trigger': str(round(price*1.03, 2))} if side == 'BUY' and not blocked else None,
+            'sim_status': 'filled'})
+engine.stop()
+store.release()
+print('seeded')

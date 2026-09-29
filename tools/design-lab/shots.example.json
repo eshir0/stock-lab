@@ -1,0 +1,5 @@
+[{"name": "desktop-light", "width": 1440, "height": 1500, "theme": "light", "jpeg": true},
+ {"name": "desktop-dark", "width": 1440, "height": 1500, "theme": "dark", "jpeg": true},
+ {"name": "mobile-light", "width": 390, "height": 844, "scale": 2, "theme": "light", "jpeg": true},
+ {"name": "agents-running", "width": 1440, "height": 900, "theme": "light", "states": ["base", "running"], "scroll": "#sec-agents", "jpeg": true},
+ {"name": "decisions-pending", "width": 1440, "height": 900, "theme": "dark", "states": ["base", "pending"], "scroll": "#sec-market", "jpeg": true}]
