@@ -46,7 +46,7 @@ with store.edit() as s:
     s['events'].insert(0, {'time': now-5400, 'message': 'AI 종목 선정 실패로 순서대로 선택합니다: [Claude 사용량 소진] 대기 중', 'level': 'warning'})
     # Scored decisions: a plausible mix of stances, engines, outcomes and rule signals.
     picks = ['BUY']*8+['HOLD']*13+['SELL']*4+['BUY']*3
-    engines = ['Claude · claude-opus-5-5']*16+['Codex · gpt-6-sol']*6+['gemini-3.5-flash']*4
+    engines = ['Claude · claude-opus-5-5']*16+['Codex · gpt-6.1-sol']*6+['gemini-3.5-flash']*4
     for i in range(26):
         symbol, stance = random.choice(symbols), picks[i]
         market = 'KR' if symbol[0].isdigit() else 'US'
