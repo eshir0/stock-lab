@@ -11,7 +11,7 @@ from .performance import performance_summary, record_performance
 
 def initial(mode, seed_krw=10000000.0, seed_usd=10000.0, name='첫 실험'):
     now = time.time()
-    state = {'mode': mode, 'running': False, 'liquidating': False, 'generation': 0, 'revision': 0,
+    state = {'mode': mode, 'running': False, 'resume': False, 'liquidating': False, 'generation': 0, 'revision': 0,
             'execution_mode': 'manual', 'max_order_ratio': .10,
             'strategy_mode': 'legacy', 'strategy_settings': {}, 'risk_days': {},
             'experiment_id': str(uuid.uuid4()), 'experiment_name': name, 'started_at': now,

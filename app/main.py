@@ -100,7 +100,7 @@ def create_app(config=None, background=True, test=False):
         tasks = [asyncio.create_task(monitor()), asyncio.create_task(work()),
                  asyncio.create_task(intel_loop()), asyncio.create_task(focus_loop())] if background else []
         yield
-        engine.stop()
+        engine.shutdown()
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

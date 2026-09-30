@@ -1,0 +1,16 @@
+[Unit]
+Description=Stock Lab (docker compose stack)
+After=docker.service network-online.target stocklab-ai-bridge.service
+Requires=docker.service
+Wants=network-online.target stocklab-ai-bridge.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/stocklab-up
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=420
+
+[Install]
+WantedBy=multi-user.target

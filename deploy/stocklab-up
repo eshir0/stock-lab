@@ -1,0 +1,12 @@
+#!/bin/bash
+# Boot helper: wait until the LAN address the app binds to exists (DHCP can be slower than Docker), then start the stack.
+cd /opt/stock-lab || exit 1
+host=$(grep -E '^APP_HOST=' .env | head -1 | cut -d= -f2 | tr -d '"'"'"' \r')
+case "$host" in ''|127.*|0.0.0.0) ;; *)
+  for _ in $(seq 1 120); do
+    ip -4 -o addr show | grep -q " ${host}/" && break
+    sleep 2
+  done
+  ip -4 -o addr show | grep -q " ${host}/" || { echo "address ${host} never appeared"; exit 1; }
+esac
+exec docker compose up -d --wait --wait-timeout 180

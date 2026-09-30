@@ -157,15 +157,46 @@ def test_cash_and_position_limits_rollback(lab):
     assert lab.store.read()['cash']['KRW'] == 10
 
 
-def test_restart_keeps_ledger_but_stops(lab):
-    lab.approve(proposal(lab))
+def test_restart_keeps_ledger_and_resumes_a_running_desk(lab):
+    lab.approve(proposal(lab))          # proposal() starts the desk, so the owner wants it running
     proposal(lab)
     before = lab.store.read()
+    lab.shutdown()                      # a deploy or reboot: the process ends, the owner did not press stop
+    assert not lab.store.read()['running']
     lab.boot()
     after = lab.store.read()
     assert before['cash'] == after['cash'] and before['trades'] == after['trades']
-    assert not after['running']
+    assert after['running'] and after['generation'] > before['generation']
     assert not any(x['status'] == 'pending' for x in after['proposals'])
+    assert not any(x['status'] == 'running' for x in after['runs'])
+
+
+def test_restart_after_a_crash_also_resumes(lab):
+    lab.start()
+    lab.boot()                          # no shutdown ran: the flag was still True in the database
+    assert lab.store.read()['running']
+
+
+def test_restart_stays_stopped_after_the_owner_pressed_stop(lab):
+    lab.start()
+    lab.stop()
+    lab.shutdown()
+    lab.boot()
+    assert not lab.store.read()['running']
+    assert not lab.store.read()['resume']
+
+
+def test_restart_does_not_resume_a_liquidation_request(lab):
+    lab.approve(proposal(lab))
+    lab.liquidate()
+    lab.shutdown()
+    lab.boot()
+    s = lab.store.read()
+    assert not s['running'] and not s['resume']
+
+
+def test_a_fresh_install_starts_stopped(lab):
+    assert not lab.store.read()['running']
 
 
 def test_liquidation_waits_closed_then_fills_once(lab):

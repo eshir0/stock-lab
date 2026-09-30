@@ -53,9 +53,28 @@ class Engine(DeskMixin, FocusMixin):
         self.busy = threading.Lock()
 
     def boot(self):
+        """Restore after a process start. A run the OWNER left running (`resume`, set by 시작 and cleared by 중지 or
+        전량 매도) continues on its own, so a reboot or a crash does not silently leave the desk idle. Every in-flight
+        cycle and pending proposal is dropped either way; the ledger is untouched. Paper trading only."""
         with self.store.edit() as s:
-            s['running'], s['liquidating'] = False, False
-            s['scheduler_status'] = '중지됨 · 시작 버튼으로 실행하세요.'
+            resume = bool(s.get('resume')) and not s['liquidating']
+            s['running'] = resume
+            s['generation'] += 1
+            s['next_run'] = time.time()
+            s['scheduler_status'] = '거래 가능한 종목을 확인하고 있습니다.' if resume else '중지됨 · 시작 버튼으로 실행하세요.'
+            for p in s['proposals']:
+                if p['status'] == 'pending':
+                    p['status'] = 'invalidated'
+            for run in s['runs']:
+                if run['status'] == 'running':
+                    run['status'] = 'cancelled'
+            event(s, '서버가 다시 시작되어 실행 중이던 상태를 이어갑니다. 잔고·보유 종목은 그대로이고 진행 중이던 분석만 다시 합니다.'
+                  if resume else '서버가 시작되었습니다. 잔고를 보존하고 중지 상태로 복구했습니다.')
+
+    def shutdown(self):
+        """Process is going away (deploy, reboot). Same clean-up as a stop, but the owner's wish to keep running stays."""
+        with self.store.edit() as s:
+            s['running'] = False
             s['generation'] += 1
             for p in s['proposals']:
                 if p['status'] == 'pending':
@@ -63,7 +82,6 @@ class Engine(DeskMixin, FocusMixin):
             for run in s['runs']:
                 if run['status'] == 'running':
                     run['status'] = 'cancelled'
-            event(s, '서버가 시작되었습니다. 잔고를 보존하고 중지 상태로 복구했습니다.')
 
     def current(self, gen):
         s = self.store.read()
@@ -73,6 +91,7 @@ class Engine(DeskMixin, FocusMixin):
         with self.store.edit() as s:
             if s['liquidating']:
                 raise RuleError('전량 매도 요청 처리 중입니다. 중지로 요청을 취소한 뒤 시작하세요.')
+            s['resume'] = True
             if not s['running']:
                 s['running'] = True
                 s['generation'] += 1
@@ -83,7 +102,7 @@ class Engine(DeskMixin, FocusMixin):
 
     def stop(self):
         with self.store.edit() as s:
-            s['running'], s['liquidating'] = False, False
+            s['running'], s['liquidating'], s['resume'] = False, False, False
             s['scheduler_status'] = '중지됨 · 보유 종목을 유지합니다.'
             s['generation'] += 1
             for p in s['proposals']:
@@ -392,7 +411,7 @@ class Engine(DeskMixin, FocusMixin):
 
     def liquidate(self):
         with self.store.edit() as s:
-            s['running'] = False
+            s['running'], s['resume'] = False, False
             s['generation'] += 1
             for p in s['proposals']:
                 if p['status'] == 'pending':
