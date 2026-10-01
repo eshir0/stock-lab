@@ -3,10 +3,15 @@ import math
 import time
 from decimal import Decimal, ROUND_HALF_UP
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from .instruments import SYMBOLS
 
 
 CURRENCIES = ('KRW', 'USD')
+ZONES = {'KRW': ZoneInfo('Asia/Seoul'), 'USD': ZoneInfo('America/New_York')}
+DAILY_KEEP = 400          # days of end-of-day equity kept per currency (the minute history covers only about a week)
 
 
 def _money(value):
@@ -57,6 +62,10 @@ def record_performance(s, now=None, quote_age=30, force=False):
             peak = value if peak is None else max(peak, value)
             drawdown = max(0.0, (peak-value)/peak*100) if peak > 0 else 0.0
             metric.update(peak=peak, max_drawdown_pct=max(metric['max_drawdown_pct'], drawdown), last_valuation_at=now)
+            daily = metric.setdefault('daily', {})
+            daily[datetime.fromtimestamp(now, ZONES[currency]).date().isoformat()] = value
+            for day in sorted(daily)[:-DAILY_KEEP]:
+                del daily[day]
     history = s.setdefault('history', [])
     if force or not history or now-history[-1]['time'] >= 60:
         history.append(point)

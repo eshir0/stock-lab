@@ -111,11 +111,11 @@ class DeskMixin:
 
     def paced_interval(self, state, until, now):
         """(seconds until the next analysis, dashboard info). The usual interval, stretched when the AI window cannot pay for
-        one every interval until `until` (day trading only; a month plan is already limited by its rule-signal gate)."""
+        one every interval until `until` (the session end or the window reset, whichever comes first)."""
         base = self.analysis_interval(state)
         cost = float((state.get('pacing') or {}).get('cost_pct', pacing.COST_DEFAULT))
         info = {'base': base, 'interval': base, 'paced': False, 'cost_pct': cost, 'pct': None, 'until': until}
-        if not self.c.quota_pacing or until is None or self.interval_plan(state)[1] is None:
+        if not self.c.quota_pacing or until is None:
             return base, info
         provider, pct, resets = self.window_usage()
         interval = pacing.pace(base, pct=pct, switch_pct=self.c.ai_switch_pct, resets_at=resets, until=until, now=now,
@@ -285,6 +285,9 @@ class DeskMixin:
         trade['strategy_mode'] = 'intraday'
         trade['exit_reason'] = proposal.get('exit_reason', '')
         trade['sizing'] = copy.deepcopy(sizing)
+        trade['origin'] = 'exit' if proposal.get('exit_reason') else proposal.get('origin', 'ai')
+        if proposal.get('reused'):
+            trade['reused'] = True
         if proposal['side'] != 'BUY':
             return
         pos = state['positions'][symbol]
@@ -384,7 +387,8 @@ class DeskMixin:
                         if other['status'] == 'pending' and other['symbol'] == symbol:
                             other['status'] = 'invalidated'
                     if s['execution_mode'] == 'auto':
-                        self.fill(s, symbol, 'SELL', qty, q, proposal['id'])
+                        self.fill(s, symbol, 'SELL', qty, q, proposal['id'],
+                                  limit=pos['take_profit_price'] if reason == '익절 조건' else None)
                         self.apply_desk_plan(s, symbol, proposal, proposal['sizing'])
                         proposal.update(status='filled', execution_mode='auto')
                         for other in s['proposals']:
@@ -401,7 +405,7 @@ class DeskMixin:
 
     def trade_cost_bps(self, symbol, quote):
         """Cost of a round trip in bps: fees, slippage, the Korean sell tax and the quoted spread."""
-        return round_trip_cost_pct(self.c, SYMBOLS[symbol]['currency'], quote)*100
+        return round_trip_cost_pct(self.c, SYMBOLS[symbol]['currency'], quote, symbol)*100
 
     @staticmethod
     def usable_candles(candles, quote, now):
@@ -413,6 +417,14 @@ class DeskMixin:
         if any(b['time']-a['time'] > 180 for a, b in zip(rows[-20:], rows[-19:])):
             return None, '분봉에 큰 공백이 있어 단기 분석을 보류합니다.'
         return rows, ''
+
+    @staticmethod
+    def trigger_side(verdict):
+        """What the rule that triggered a month analysis said (the "규칙대로" baseline the AI is scored against), or None
+        when the analysis was not started by a rule."""
+        if not verdict or verdict.get('reason') != 'signal':
+            return None
+        return 'SELL' if verdict.get('held') else 'BUY'
 
     @staticmethod
     def previous_note(state, symbol, now, quote):
@@ -433,7 +445,8 @@ class DeskMixin:
                                   'result': '대기 중' if watch['status'] == 'waiting' else entry.FINISHED.get(watch['status'], watch['status'])}
         return note
 
-    def place_desk_order(self, s, symbol, decision, fresh, *, gen, rev, run_id, reference_quote=None, run=None, source='ai'):
+    def place_desk_order(self, s, symbol, decision, fresh, *, gen, rev, run_id, reference_quote=None, run=None, source='ai',
+                         reused=False):
         """One BUY or SELL decision becomes a paper order under the desk's risk rules: size it, dry-run the fill on a copy, then fill
         it (auto) or queue it for approval (manual). Raises RiskError, ProviderError or ValueError when a rule refuses, and nothing
         has been filled then. The analysis cycle and a triggered conditional entry both come through here."""
@@ -458,6 +471,8 @@ class DeskMixin:
                     'summary': decision['summary'], 'risks': decision['risks'], 'sizing': sizing, 'strategy_mode': 'intraday'}
         if source != 'ai':
             proposal['origin'] = source
+        if reused:
+            proposal['reused'] = True
         for key in ('target_weight_pct', 'stop_loss_pct', 'take_profit_pct', 'max_holding_minutes'):
             proposal[key] = decision[key]
         self.fill(copy.deepcopy(s), symbol, side, sizing['quantity'], fresh, 'validation')
@@ -494,7 +509,7 @@ class DeskMixin:
         else:
             month = horizon_of(s.get('strategy_settings')) == 'month'
             fields, note = entry.plan_from(decision, quote=quote, horizon='month' if month else 'intraday', now=now,
-                                           currency=item['currency'], min_take_pct=min_take_pct(self.c, item['currency'], quote))
+                                           currency=item['currency'], min_take_pct=min_take_pct(self.c, item['currency'], quote, symbol))
         if fields is None:
             run['watch'] = {'status': 'rejected', 'note': note}
             event(s, f'{item["name"]} · {note}')
@@ -502,6 +517,7 @@ class DeskMixin:
         watch = entry.make_watch(fields, symbol=symbol, name=item['name'], market=item['market'], currency=item['currency'],
                                  horizon=horizon_of(s.get('strategy_settings')), reference=mid(quote), summary=decision['summary'],
                                  engine=decision.get('engine'), run_id=run['id'], generation=gen, now=now)
+        watch['reused'] = bool(run.get('reuse'))
         s.setdefault('watches', []).append(watch)
         entry.trim(s)
         run['watch'] = {'status': 'waiting', 'id': watch['id'], 'note': entry.describe(watch)}
@@ -571,7 +587,8 @@ class DeskMixin:
                         'risks': ['가격 조건이 맞아 AI 호출 없이 체결했습니다. 조건을 정한 뒤 뉴스·시장 상황이 달라졌을 수 있습니다.']}
             try:
                 proposal, sizing = self.place_desk_order(s, symbol, decision, fresh, gen=gen, rev=s['revision'],
-                                                         run_id=live['run_id'], source='watch')
+                                                         run_id=live['run_id'], source='watch',
+                                                         reused=bool(live.get('reused')))
             except (RiskError, ProviderError) as exc:
                 entry.close(live, 'blocked', str(exc), now)
                 event(s, f'{name} 조건 진입이 위험 규칙에 막혀 폐기되었습니다: '+str(exc), 'warning')
@@ -816,7 +833,7 @@ class DeskMixin:
             run = next(x for x in s['runs'] if x['id'] == run_id)
             run['status'] = 'completed'
             tracked = s.setdefault('pacing', {})
-            tracked['cost_pct'] = pacing.learn(float(tracked.get('cost_pct', pacing.COST_DEFAULT)), usage_before, usage_after)
+            tracked['samples'], tracked['cost_pct'] = pacing.learn(tracked.get('samples'), usage_before, usage_after)
             s['scheduler_status'] = '조사·반대 검토·최종 판단 완료 · 청산 규칙은 별도로 감시합니다.'
             scorecard = record_decision(
                 s, run_id=run_id, symbol=symbol, market=SYMBOLS[symbol]['market'], decision=decision, quote=fresh,
@@ -824,6 +841,7 @@ class DeskMixin:
                 selected_by=run.get('selected_by', 'server'), now=time.time(),
                 rules=(verdicts.get(symbol) or {}).get('signals') if month else signals(candles),
                 horizon='month' if month else 'intraday', reused=found is not None,
+                trigger_side=self.trigger_side(verdicts.get(symbol)) if month else None,
                 cost_bps=self.trade_cost_bps(symbol, fresh))
             self.plan_entry(s, symbol, decision, fresh, run, gen, time.time())
             if decision['stance'] == 'HOLD' or s['revision'] != rev:
@@ -831,7 +849,7 @@ class DeskMixin:
                 return
             try:
                 proposal, sizing = self.place_desk_order(s, symbol, decision, fresh, gen=gen, rev=rev, run_id=run_id,
-                                                         reference_quote=quote, run=run)
+                                                         reference_quote=quote, run=run, reused=found is not None)
                 if scorecard:
                     scorecard['action'] = proposal['status']
                 event(s, f'{SYMBOLS[symbol]["name"]} 목표 비중·손절 위험으로 {sizing["quantity"]}주 산정 · '+('자동 체결' if s['execution_mode'] == 'auto' else '승인 대기'))

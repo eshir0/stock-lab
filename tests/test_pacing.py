@@ -52,11 +52,19 @@ def test_missing_readings_mean_no_pacing():
     assert pacing.pace(600, pct=10, switch_pct=80, resets_at=NOW+HOUR, until=None, now=NOW, cost=15) == 600
 
 
-def test_the_cost_estimate_follows_what_an_analysis_really_used_and_ignores_unusable_readings():
-    assert pacing.learn(15.0, 2.0, 21.0) == pytest.approx(.6*15+.4*19, abs=.05)
-    assert pacing.learn(15.0, 50.0, 10.0) == 15.0 and pacing.learn(15.0, None, 30.0) == 15.0 and pacing.learn(15.0, 10.0, 10.0) == 15.0
-    assert pacing.learn(15.0, 0.0, 99.0) == pacing.COST_MAX*1.0 or pacing.learn(15.0, 0.0, 99.0) <= pacing.COST_MAX
-    assert pacing.learn(3.0, 10.0, 10.1) >= pacing.COST_MIN
+def test_the_cost_estimate_is_the_median_of_recent_readings_and_skips_unusable_ones():
+    assert pacing.learn(None, 2.0, 21.0) == ([19.0], 19.0)
+    assert pacing.learn(None, None, 30.0) == ([], pacing.COST_DEFAULT)
+    assert pacing.learn([10.0], 50.0, 10.0) == ([10.0], 10.0)                       # the window reset in between: skipped
+    assert pacing.learn([10.0], 10.0, 10.0) == ([10.0], 10.0)
+    assert pacing.learn([], 0.0, 99.0)[1] == pacing.COST_MAX and pacing.learn([], 10.0, 10.1)[1] == pacing.COST_MIN
+    # other use of the same subscription while an analysis ran inflates one reading: the median shrugs it off
+    samples, cost = pacing.learn([10.0, 11.0, 9.0, 10.0], 20.0, 60.0)
+    assert samples[-1] == 40.0 and cost == 10.0
+    samples, cost = pacing.learn([30.0]*20, 0.0, 5.0)                             # only the last SAMPLES readings count
+    assert len(samples) == pacing.SAMPLES and cost == 30.0
+    assert pacing.learn([True, 'x', 12.0], None, None) == ([12.0], 12.0)
+    assert pacing.learn([10.0, 20.0], None, None) == ([10.0, 20.0], 15.0)
 
 
 # ---- in the desk -----------------------------------------------------------------------------------------------------------
@@ -140,13 +148,16 @@ def test_an_ai_without_a_usage_window_is_not_paced(desk):
     assert not state['pacing']['paced'] and state['pacing']['pct'] is None and 595 <= gap(state, started) <= 615
 
 
-def test_a_month_plan_is_not_paced_because_its_rule_signal_gate_already_limits_the_calls(tmp_path):
+def test_a_month_plan_is_paced_the_same_way(tmp_path):
     engine, store = make(tmp_path, horizon='month')
     set_usage(engine, .20, 2)
     engine.signal_gate = False
     started = time.time()
     state = run_cycle(engine)
-    assert not state['pacing']['paced'] and 1190 <= gap(state, started) <= 1210
+    info = state['pacing']
+    expected = pacing.pace(1200, pct=20.0, switch_pct=80.0, resets_at=info['resets_at'], until=info['until'], now=started,
+                           cost=pacing.COST_DEFAULT)
+    assert info['paced'] and expected > 1200 and abs(gap(state, started)-expected) <= 15
     store.release()
 
 
@@ -163,7 +174,8 @@ def test_the_desk_learns_what_an_analysis_costs_from_the_window_reading(desk):
         return real(role, context, generation)
     desk.agents.run = spy
     run_cycle(desk)
-    assert desk.store.read()['pacing']['cost_pct'] == pytest.approx(.6*pacing.COST_DEFAULT+.4*30, abs=.2)
+    tracked = desk.store.read()['pacing']
+    assert tracked['samples'] == [30.0] and tracked['cost_pct'] == 30.0
 
 
 def test_a_window_that_resets_during_an_analysis_is_not_counted_as_cost(desk):

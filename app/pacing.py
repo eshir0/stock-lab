@@ -10,12 +10,21 @@ COST_MIN, COST_MAX = 3.0, 40.0
 PACE_MAX = 75*60               # the longest pause pacing will ask for, in seconds
 
 
-def learn(cost, before, after):
-    """Smoothed cost of one analysis in percent of the window. Readings that cannot be compared (missing, or the window
-    reset in between) leave the estimate alone."""
-    if not isinstance(before, (int, float)) or not isinstance(after, (int, float)) or after <= before:
-        return cost
-    return round(max(COST_MIN, min(COST_MAX, .6*cost+.4*(after-before))), 1)
+SAMPLES = 9                    # recent readings the estimate is taken from
+
+
+def learn(samples, before, after):
+    """(recent readings, the cost to plan with): what one analysis used of the window, as the MEDIAN of the last SAMPLES
+    readings. Not an average: other use of the same subscription while an analysis runs (an interactive session) inflates
+    single readings, and one such reading must not double the plan. Readings that cannot be compared (missing, or the
+    window reset in between) are skipped."""
+    kept = [float(x) for x in (samples or []) if isinstance(x, (int, float)) and not isinstance(x, bool)][-SAMPLES:]
+    if isinstance(before, (int, float)) and isinstance(after, (int, float)) and after > before:
+        kept = (kept+[round(max(COST_MIN, min(COST_MAX, after-before)), 1)])[-SAMPLES:]
+    if not kept:
+        return kept, COST_DEFAULT
+    ordered, mid = sorted(kept), len(kept)//2
+    return kept, round(ordered[mid] if len(kept) % 2 else (ordered[mid-1]+ordered[mid])/2, 1)
 
 
 def pace(base, *, pct, switch_pct, resets_at, until, now, cost, cap=PACE_MAX):

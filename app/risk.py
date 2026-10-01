@@ -127,30 +127,56 @@ def _instrument(symbol):
     return instrument, factor
 
 
-def _round_trip_cost(config, currency, quote):
+US_FREE_ORDER = Decimal('10')     # Toss: a US order whose total fill is $10 or less pays no commission
+
+
+def is_etf(symbol):
+    item = SYMBOLS.get(symbol) or {}
+    return bool(item.get('etf') or item.get('leveraged_etf'))
+
+
+def taxed(currency, symbol=None):
+    """Korea's securities transaction tax is due on selling a listed stock; ETFs are exempt. Without a symbol a Korean sale is
+    assumed taxed (the conservative side)."""
+    return currency == 'KRW' and not (symbol and is_etf(symbol))
+
+
+def trade_fee(config, symbol, side, gross):
+    """Commission, plus the Korean transaction tax on a stock sale, of one fill (a Decimal in the instrument's currency)."""
+    currency = SYMBOLS[symbol]['currency']
+    gross = Decimal(str(gross))
+    bps = Decimal(str(config.fee_kr if currency == 'KRW' else config.fee_us))
+    if currency == 'USD' and gross <= US_FREE_ORDER:
+        bps = Decimal('0')
+    if side == 'SELL' and taxed(currency, symbol):
+        bps += Decimal(str(config.sell_tax_kr))
+    return gross*bps/10000
+
+
+def _round_trip_cost(config, currency, quote, symbol=None):
     """What one buy and one sell cost, in percent of the price (a Decimal): both fees, both slippages, the Korean sell tax and the
     quoted spread."""
     bid, ask = _decimal(quote.get('bid'), '매수 호가', .00000001), _decimal(quote.get('ask'), '매도 호가', .00000001)
     fee = _decimal(config.fee_kr if currency == 'KRW' else config.fee_us, '수수료', 0, 1000)
     slip = _decimal(config.slippage_bps, '슬리피지', 0, 1000)
-    tax = _decimal(config.sell_tax_kr, '매도세', 0, 1000) if currency == 'KRW' else Decimal('0')
+    tax = _decimal(config.sell_tax_kr, '매도세', 0, 1000) if taxed(currency, symbol) else Decimal('0')
     spread = (ask-bid)/((ask+bid)/2)*10000 if ask >= bid else Decimal('0')
     return (2*fee+2*slip+tax+spread)/100
 
 
-def _min_take(config, currency, quote):
+def _min_take(config, currency, quote, symbol=None):
     ratio = Decimal(str(getattr(config, 'min_take_cost_ratio', 0) or 0))
-    return ratio*_round_trip_cost(config, currency, quote) if ratio > 0 else Decimal('0')
+    return ratio*_round_trip_cost(config, currency, quote, symbol) if ratio > 0 else Decimal('0')
 
 
-def round_trip_cost_pct(config, currency, quote):
+def round_trip_cost_pct(config, currency, quote, symbol=None):
     """The round-trip cost in percent. The judgement scoring deducts the same estimate (`DeskMixin.trade_cost_bps`)."""
-    return float(_round_trip_cost(config, currency, quote))
+    return float(_round_trip_cost(config, currency, quote, symbol))
 
 
-def min_take_pct(config, currency, quote):
+def min_take_pct(config, currency, quote, symbol=None):
     """The narrowest take-profit (percent) a buy may have: `MIN_TAKE_COST_RATIO` times the round-trip cost; 0 when the rule is off."""
-    return float(_min_take(config, currency, quote))
+    return float(_min_take(config, currency, quote, symbol))
 
 
 def _stop_exit(stop, spread, slip, sell_fee):
@@ -178,7 +204,7 @@ def size_order(state, symbol, quote, decision, constraints, config, now=None):
         raise RiskError('매수 호가가 매도 호가보다 높습니다.')
     slip = _decimal(config.slippage_bps, '슬리피지', 0, 1000)/10000
     fee = _decimal(config.fee_kr if currency == 'KRW' else config.fee_us, '수수료', 0, 1000)/10000
-    tax = _decimal(config.sell_tax_kr, '매도세', 0, 1000)/10000 if currency == 'KRW' else Decimal('0')
+    tax = _decimal(config.sell_tax_kr, '매도세', 0, 1000)/10000 if taxed(currency, symbol) else Decimal('0')
     sell_fee = fee+tax
     held = _shares(state.get('positions', {}).get(symbol, {}).get('quantity', 0), '보유 수량', fractional)
     max_buy = min(Decimal(shares.MAX_QUANTITY), _shares(constraints.get('max_buy_quantity', 0), '최대 매수 수량', fractional))
@@ -221,9 +247,9 @@ def size_order(state, symbol, quote, decision, constraints, config, now=None):
     if nav == 0:
         result['reason'] = '해당 통화의 가상 자산이 없습니다.'
         return result
-    floor = _min_take(config, currency, quote)
+    floor = _min_take(config, currency, quote, symbol)
     if floor > 0 and take_pct < floor:
-        result['reason'] = (f'익절 폭 {float(take_pct):g}%가 왕복 비용({float(_round_trip_cost(config, currency, quote)):.2f}%)의 '
+        result['reason'] = (f'익절 폭 {float(take_pct):g}%가 왕복 비용({float(_round_trip_cost(config, currency, quote, symbol)):.2f}%)의 '
                             f'{float(config.min_take_cost_ratio):g}배(최소 {float(floor):.2f}%)에 못 미쳐 매수하지 않습니다. 목표가 비용에 잡아먹히는 거래입니다.')
         return result
 

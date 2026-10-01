@@ -143,6 +143,7 @@ class Store:
             new['strategy_mode'] = strategy_mode
             new['strategy_settings'] = copy.deepcopy(strategy_settings or {})
             new['daily_ai'] = copy.deepcopy(state['daily_ai'])
+            new['ai_checks'] = copy.deepcopy(state.get('ai_checks', {}))
             new['quotes'] = copy.deepcopy(state['quotes'])
             new['generation'] = state['generation']+1
             new['revision'] = state['revision']+1

@@ -88,6 +88,13 @@ def create_app(config=None, background=True, test=False):
                 raise
             except Exception:
                 pass
+            for job in (engine.refresh_benchmark, engine.check_providers, engine.notify):
+                try:
+                    await asyncio.to_thread(job)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
             await asyncio.sleep(30)
 
     async def work():
@@ -284,12 +291,14 @@ def create_app(config=None, background=True, test=False):
     def new_experiment(data: Experiment):
         if data.confirmation != '새 실험 시작':
             raise RuleError('이전 실험 보관과 새 실험 시작 확인이 필요합니다.')
+        if data.strategy_mode == 'intraday' and data.horizon != 'month':
+            raise RuleError('당일 단타는 제거되었습니다. 1개월 스윙으로 시작하세요.')
         result = engine.new_experiment(data.seed_krw, data.seed_usd, data.name, data.max_order_pct,
                                       strategy_mode=data.strategy_mode, strategy_settings={
                                           'include_leveraged_etfs': data.include_leveraged_etfs,
                                           'universe_mode': data.universe_mode, 'horizon': data.horizon,
                                           'max_position_pct': (data.max_position_pct if data.max_position_pct is not None
-                                                               else 100 if data.horizon == 'intraday' else 30),
+                                                               else 30),
                                           'risk_per_trade_pct': data.risk_per_trade_pct,
                                           'daily_loss_limit_pct': data.daily_loss_limit_pct,
                                           **({'max_holding_minutes': data.max_holding_minutes}

@@ -19,7 +19,9 @@ from .desk import DeskMixin
 from .focus import FocusMixin, universe_mode
 from . import universe
 from . import shares
-from .risk import min_take_pct, normalize_settings, RiskError, round_trip_cost_pct
+from .risk import min_take_pct, normalize_settings, RiskError, round_trip_cost_pct, trade_fee
+from . import scorecard, verification
+from .notify import Notifier
 from .providers import DemoProvider, ProviderError, RateLimited, TossProvider
 from .performance import performance_summary, record_performance
 from .store import event
@@ -49,6 +51,9 @@ class Engine(DeskMixin, FocusMixin):
         self.focus_attempts = {}   # market -> (time of the last build attempt, consecutive failures, session date)
         self.daily_cache = {}      # symbol -> (read at, completed daily bars of the last ~3 months)
         self.days_scored_at = 0
+        self.benchmark_at = 0
+        self.checked_at = 0
+        self.notifier = Notifier(config.notify_url)
         self.signal_gate = config.mode != 'demo'   # demo answers are scripted, so there is nothing to conserve
         self.active_provider = None
         self.provider = provider or (DemoProvider() if config.mode == 'demo' else TossProvider(config))
@@ -162,9 +167,14 @@ class Engine(DeskMixin, FocusMixin):
             raise RuleError('지원하지 않는 전략입니다.')
         try:
             settings = normalize_settings(strategy_settings) if strategy_mode == 'intraday' else {}
-            return self.store.reset_experiment(krw, usd, name, max_order_pct/100, strategy_mode, settings)
+            result = self.store.reset_experiment(krw, usd, name, max_order_pct/100, strategy_mode, settings)
         except ValueError as exc:
             raise RuleError(str(exc)) from None
+        if strategy_mode == 'intraday':
+            # The bar this experiment must clear is fixed now, before any result exists (verification.py).
+            with self.store.edit() as s:
+                s['verification'] = result['verification'] = verification.start(self.c, s['started_at'])
+        return result
 
     def fractional(self, currency):
         """US instruments trade in fractional shares (a simulation assumption, FRACTIONAL_US); Korean ones in whole shares."""
@@ -200,8 +210,8 @@ class Engine(DeskMixin, FocusMixin):
             max_sell = min(held, int(q['bid_size'])) if s.get('strategy_mode') == 'intraday' else held
         return {'max_order_equity_ratio': order_ratio,
                 'max_position_equity_ratio': name_ratio, 'portfolio_equity': nav,
-                'round_trip_cost_pct': round(round_trip_cost_pct(self.c, currency, q), 3),
-                'min_take_profit_pct': round(min_take_pct(self.c, currency, q), 3),
+                'round_trip_cost_pct': round(round_trip_cost_pct(self.c, currency, q, symbol), 3),
+                'min_take_profit_pct': round(min_take_pct(self.c, currency, q, symbol), 3),
                 'max_buy_quantity': max_buy, 'max_sell_quantity': max_sell,
                 'integer_shares_only': not fractional, 'fractional_shares': fractional,
                 'shorting': False, 'leverage': False,
@@ -272,6 +282,71 @@ class Engine(DeskMixin, FocusMixin):
         if bars:
             with self.store.edit() as s:
                 score_days(s, now, bars)
+
+    def refresh_benchmark(self, now=None):
+        """Daily closes of the index ETFs the experiment is compared with (scorecard.BENCHMARKS), read at most every 15 minutes
+        outside the state lock. The starting close is fixed the first time and never moves."""
+        now = time.time() if now is None else now
+        if now-self.benchmark_at < 900:
+            return
+        self.benchmark_at = now
+        state = self.store.read()
+        if state.get('strategy_mode') != 'intraday':
+            return
+        rows = {}
+        for currency, symbol in scorecard.BENCHMARKS.items():
+            if (state.get('initial') or {}).get(currency, 0) <= 0:
+                continue
+            try:
+                rows[currency] = (symbol, self.daily_bars(symbol, now))
+            except (ProviderError, KeyError, ValueError):
+                continue
+        if not rows:
+            return
+        with self.store.edit() as s:
+            if s['experiment_id'] != state['experiment_id']:
+                return
+            bench = s.setdefault('benchmark', {})
+            for currency, (symbol, bars) in rows.items():
+                found = scorecard.benchmark_entry(symbol, bars, s['started_at'], bench.get(currency))
+                if found:
+                    bench[currency] = found
+
+    CHECK_EVERY = 24*3600          # a provider that has not answered for this long is sent one tiny request
+    CHECK_RETRY = 3*3600           # a failed check is repeated after this long
+
+    def usable_providers(self):
+        gate = self.agents.gate
+        return list(gate.plan()[0]) if gate.enabled else list(self.c.provider_order)
+
+    def check_providers(self, now=None):
+        """A fallback AI that has not answered for a day gets one tiny request as soon as it is usable again, so a broken
+        fallback (a new model, a CLI update) shows on the dashboard before the desk has to rely on it. One check per round,
+        at most every ten minutes; a real answer counts as a check."""
+        now = time.time() if now is None else now
+        if self.c.mode == 'demo' or not self.c.bridge_configured or now-self.checked_at < 600:
+            return
+        self.checked_at = now
+        checks = self.store.read().get('ai_checks') or {}
+        for provider in self.usable_providers():
+            if provider not in ('claude', 'codex'):
+                continue
+            last = checks.get(provider) or {}
+            answered = max(self.agents.answered.get(provider, 0), last.get('time', 0) if last.get('ok') else 0)
+            if now-answered < self.CHECK_EVERY or (last and not last.get('ok') and now-last.get('time', 0) < self.CHECK_RETRY):
+                continue
+            result = self.agents.self_check(provider)
+            label = PROVIDER_LABELS.get(provider, provider)
+            with self.store.edit() as s:
+                s.setdefault('ai_checks', {})[provider] = dict(result, time=time.time())
+                event(s, f'{label} 응답 확인: ' + (f'정상 ({result["model"]}, {result["seconds"]}초)' if result['ok']
+                                                     else '실패 - '+result['message']), 'info' if result['ok'] else 'warning')
+            return
+
+    def notify(self):
+        """Phone notifications for new fills and warnings (notify.py); nothing is read while they are off."""
+        if self.notifier.enabled:
+            self.notifier.poll(self.store.read())
 
     def refresh_intel(self):
         """Official ranking and investor-flow reads on their own slow cadence.
@@ -355,7 +430,7 @@ class Engine(DeskMixin, FocusMixin):
         self.validate_quote(q, symbol)
         return q
 
-    def fill(self, s, symbol, side, qty, q, ref, liquidation=False):
+    def fill(self, s, symbol, side, qty, q, ref, liquidation=False, limit=None):
         self.validate_quote(q, symbol)
         s['quotes'][symbol] = q
         currency = SYMBOLS[symbol]['currency']
@@ -370,11 +445,13 @@ class Engine(DeskMixin, FocusMixin):
         slip = Decimal(str(self.c.slippage_bps))/10000
         price = money(Decimal(str(q['ask'] if side == 'BUY' else q['bid'])) *
                       (1+slip if side == 'BUY' else 1-slip))
+        if limit is not None:
+            # A take-profit is a resting limit order (one side of a bracket): once the market reaches it, it fills at its own price.
+            if side != 'SELL' or not q['bid'] >= limit:
+                raise RuleError('지정가에 도달하지 않아 체결하지 않습니다.')
+            price = money(limit)
         gross = money(Decimal(str(price))*qty_d)
-        bps = self.c.fee_kr if currency == 'KRW' else self.c.fee_us
-        if currency == 'KRW' and side == 'SELL':
-            bps += self.c.sell_tax_kr
-        fee = money(Decimal(str(gross))*Decimal(str(bps))/10000)
+        fee = money(trade_fee(self.c, symbol, side, gross))
         pos = s['positions'].get(symbol, {'quantity': 0, 'average': 0})
         cost_basis = pos.get('cost_basis', money(pos['average']*pos['quantity']))
         if side == 'BUY':
@@ -693,6 +770,7 @@ class Engine(DeskMixin, FocusMixin):
 
     def public_state(self):
         s = self.store.read()
+        tracking = copy.deepcopy(s.get('performance') or {})        # with the daily equity record the summary leaves out
         s['instruments'] = self.active_instruments(s)
         s['equity'] = {c: equity(s, c) for c in ('KRW', 'USD')}
         s['performance'] = performance_summary(s, quote_age=self.c.quote_age)
@@ -715,6 +793,10 @@ class Engine(DeskMixin, FocusMixin):
         s.pop('shadow_orders', None)
         evaluations = s.get('evaluations', [])
         s['evaluation'] = summarize(evaluations)
+        card = scorecard.report(s['trades'])                         # every trade, before the list is cut for the page
+        s['scorecard'] = card
+        s['verification'] = verification.judge(s, tracking=tracking, report=card, evaluation=s['evaluation'], config=self.c,
+                                               now=time.time())
         s['evaluations'] = [{k: v for k, v in e.items() if k != 'candidates'} for e in evaluations[-30:]]
         watches = s.get('watches') or []
         s['watches'] = [w for w in watches if w['status'] == 'waiting'] + [w for w in watches if w['status'] != 'waiting'][-8:]
@@ -728,6 +810,7 @@ class Engine(DeskMixin, FocusMixin):
                        'model': self.c.model, 'providers': self.c.provider_order, 'daily_limit': self.c.ai_daily_calls,
                        'poll': self.c.poll_seconds, 'interval': self.interval_plan(s)[0], 'interval_active': self.interval_plan(s)[1],
                        'conditional_entry': self.c.conditional_entry, 'min_take_cost_ratio': self.c.min_take_cost_ratio,
+                       'ai_light_roles': list(self.c.ai_light_roles), 'models': {'main': self.c.claude_model, 'light': self.c.claude_model_light},
                        'fee_kr_bps': self.c.fee_kr, 'fee_us_bps': self.c.fee_us,
                        'sell_tax_kr_bps': self.c.sell_tax_kr, 'slippage_bps': self.c.slippage_bps,
                        'roles': [{'id': role, 'name': name} for role, name in (DESK_ROLES if s.get('strategy_mode') == 'intraday' else ROLES)],

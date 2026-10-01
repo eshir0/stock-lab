@@ -52,7 +52,16 @@ def test_only_the_ai_and_toss_modules_import_httpx():
                 [node.module or ''] if isinstance(node, ast.ImportFrom) else []
             if any(name == 'httpx' or name.startswith('httpx.') for name in names):
                 importers.add(path.name)
-    assert importers == {'agents.py', 'providers.py'}
+    assert importers == {'agents.py', 'providers.py', 'notify.py'}
+
+
+def test_the_notifier_only_posts_text_to_the_owners_own_url_and_knows_no_broker():
+    """notify.py may use HTTP, but only to send a plain-text message to NOTIFY_URL: no broker host, no order or account path,
+    no credential, and nothing but a single post call."""
+    source = (APP/'notify.py').read_text(encoding='utf-8')
+    for banned in ('tossinvest', 'openapi', 'order', 'account', 'token', 'secret', 'Authorization', 'httpx.get', 'httpx.Client'):
+        assert banned not in source, banned
+    assert source.count('httpx.post') == 1 and 'self.url' in source
 
 
 def test_read_only_allow_list_matches_no_trading_or_account_path():

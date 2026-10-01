@@ -1,0 +1,240 @@
+"""The verification plan and the trade report card: round trips from the ledger, their statistics with an honest confidence
+interval, an index ETF simply held as the benchmark, the rule-follow baseline the AI is scored against, and the fixed plan
+with its verdict. Plain dicts plus throw-away ledgers; no market data or AI service is contacted."""
+import time
+
+import pytest
+
+from app import evaluation, scorecard, verification
+from app.config import Config
+from app.performance import record_performance
+from app.scorecard import benchmark_entry, mean_ci, report, round_trips, t95
+from test_month_desk import bars, desk, run_cycle, series          # noqa: F401  (desk is a fixture)
+
+DAY = 86400
+NOW = 1_800_000_000.0
+
+
+# ---- statistics ---------------------------------------------------------------------------------------------------------
+
+def test_the_confidence_interval_is_never_surer_than_the_sample_allows():
+    assert t95(1) == 12.706 and t95(11) == 2.228 and t95(119) == 2.0 and t95(200) == 1.96 and t95(0) is None
+    mean, low, high = mean_ci([1, 2, 3])
+    assert mean == 2 and low == pytest.approx(2-4.303/3**.5, abs=1e-3) and high == pytest.approx(2+4.303/3**.5, abs=1e-3)
+    assert mean_ci([5]) == (5, None, None) and mean_ci([]) == (None, None, None)
+    assert mean_ci([1.0]*40)[1:] == (1.0, 1.0)                        # no spread: no doubt
+
+
+# ---- round trips --------------------------------------------------------------------------------------------------------
+
+def fill(t, symbol, side, qty, price, fee=0.0, realized=0.0, **extra):
+    return {'time': t, 'symbol': symbol, 'side': side, 'quantity': qty, 'price': price, 'fee': fee, 'realized': realized, **extra}
+
+
+TRADES = [
+    fill(1*DAY, '005930', 'BUY', 10, 100.0, fee=1.0, origin='ai', reused=True),
+    fill(2*DAY, '005930', 'SELL', 4, 110.0, realized=38.0, exit_reason='익절 조건'),
+    fill(3*DAY, '005930', 'SELL', 6, 90.0, realized=-61.0, exit_reason='손절 조건'),        # closes the first trip: -23 on 1,001
+    fill(4*DAY, '122630', 'BUY', 1, 1000.0, fee=2.0, entry_watch='w1'),
+    fill(6*DAY, '122630', 'SELL', 1, 1100.0, realized=96.0),                                   # +96 on 1,002
+    fill(7*DAY, 'AAPL', 'BUY', .5, 200.0, fee=0.0),                                            # still open
+    fill(8*DAY, 'MSFT', 'SELL', 1, 400.0, realized=5.0),                                       # a sale with no recorded buy
+    fill(9*DAY, 'NOPE', 'BUY', 1, 1.0),
+]
+
+
+def test_round_trips_run_from_the_first_buy_to_the_sale_that_leaves_nothing():
+    closed, still = round_trips(TRADES)
+    assert [t['symbol'] for t in closed] == ['005930', '122630'] and [t['symbol'] for t in still] == ['AAPL']
+    first, second = closed
+    assert first['pnl'] == -23.0 and first['return_pct'] == pytest.approx(-23/1001*100, abs=1e-4) and first['days'] == 2
+    assert (first['origin'], first['reused'], first['leveraged'], first['exit_reason']) == ('ai', True, False, '손절 조건')
+    assert (second['origin'], second['reused'], second['leveraged']) == ('watch', False, True)
+    assert second['return_pct'] == pytest.approx(96/1002*100, abs=1e-4)
+
+
+def test_the_report_card():
+    card = report(TRADES)
+    assert (card['closed'], card['open'], card['wins'], card['losses']) == (2, 1, 1, 1)
+    assert card['win_rate_pct'] == 50.0 and card['expectancy_pct'] == pytest.approx((-23/1001+96/1002)*50, abs=1e-3)
+    assert card['payoff'] == pytest.approx((96/1002)/(23/1001), abs=1e-2)
+    assert card['profit_factor'] == pytest.approx((96/1002)/(23/1001), abs=1e-2)
+    assert card['pnl'] == {'KRW': 73.0} and card['avg_days'] == 2.0
+    assert card['ci_pct'][0] < card['expectancy_pct'] < card['ci_pct'][1]
+    groups = card['groups']
+    assert groups['leveraged']['count'] == 1 and groups['plain']['count'] == 1 and groups['watch']['count'] == 1
+    assert groups['analysis']['count'] == 1 and groups['reused']['count'] == 1 and groups['fresh']['count'] == 1
+    assert [t['symbol'] for t in card['recent']] == ['122630', '005930']                       # newest first
+    empty = report([])
+    assert empty['closed'] == 0 and empty['expectancy_pct'] is None and empty['ci_pct'] is None and empty['payoff'] is None
+
+
+def test_an_even_round_trip_counts_as_a_loss_and_profit_factor_needs_a_loss():
+    card = report([fill(1, 'AAPL', 'BUY', 1, 100.0), fill(2, 'AAPL', 'SELL', 1, 100.0, realized=0.0)])
+    assert card['losses'] == 1 and card['profit_factor'] is None and card['payoff'] is None
+
+
+# ---- the benchmark --------------------------------------------------------------------------------------------------------
+
+def daily(closes, first=NOW-10*DAY):
+    return [{'time': first+i*DAY, 'close': c} for i, c in enumerate(closes)]
+
+
+def test_the_benchmark_is_an_index_etf_bought_at_the_start_and_held():
+    rows = daily([100, 101, 102, 110, 99, 105])                      # the start falls between the 3rd and the 4th bar
+    entry = benchmark_entry('069500', rows, NOW-8*DAY+60)
+    assert entry['start_close'] == 102 and entry['last_close'] == 105 and entry['return_pct'] == pytest.approx(2.941, abs=1e-3)
+    assert entry['max_drawdown_pct'] == pytest.approx((110-99)/110*100, abs=1e-3) and entry['name'] == 'KODEX 200'
+    later = benchmark_entry('069500', rows+daily([120], first=NOW-4*DAY), NOW, entry)        # the starting close never moves
+    assert later['start_close'] == 102 and later['return_pct'] == pytest.approx(120/102*100-100, abs=1e-3)
+    assert benchmark_entry('069500', rows, NOW-20*DAY) is None                                 # nothing before the start yet
+    assert benchmark_entry('SPY', [], NOW, None) is None and benchmark_entry('SPY', [], NOW, entry) == entry
+    fresh = benchmark_entry('069500', rows[:3], NOW-8*DAY+60)
+    assert fresh['return_pct'] == 0 and fresh['last_close'] == 102
+
+
+# ---- the plan and its verdict ------------------------------------------------------------------------------------------------
+
+CFG = Config(mode='demo', password='x'*8, session_secret='y'*32)
+
+
+def judge(days=60, mine=5.0, index=2.0, drawdown=3.0, expectancy=.8, ci=(.2, 1.4), closed=30, decisions=120, groups=None,
+          changes=(10_000,)*5, plan=None, **extra):
+    state = {'verification': plan or verification.start(CFG, NOW-days*DAY), 'initial': {'KRW': 1_000_000, 'USD': 0},
+             'performance': {'KRW': {'return_pct': mine, 'max_drawdown_pct': drawdown}},
+             'benchmark': {'KRW': {'name': 'KODEX 200', 'return_pct': index}} if index is not None else {}}
+    equity, values = 1_000_000, {}
+    for i, change in enumerate(changes):
+        equity += change
+        values[f'2026-08-{i+1:02d}'] = equity
+    card = {'closed': closed, 'expectancy_pct': expectancy, 'ci_pct': list(ci) if ci else None, 'groups': groups or {}}
+    ev = {'horizons': {'d5': {'scored': decisions, 'ai_vs_rule': {'count': 3}}}}
+    return verification.judge(state, tracking={'KRW': {'daily': values}}, report=card, evaluation=ev, config=extra.get('config', CFG),
+                              now=NOW)
+
+
+def test_the_plan_is_fixed_at_the_start_with_a_fingerprint_of_the_strategy():
+    plan = verification.start(CFG, NOW)
+    assert plan['criteria'] == verification.CRITERIA and plan['started_at'] == NOW and plan['version'] == verification.STRATEGY_VERSION
+    assert plan['fingerprint'] == verification.fingerprint(CFG) and len(plan['fingerprint']) == 16
+    assert verification.fingerprint(Config(mode='demo', password='x'*8, session_secret='y'*32, fee_kr=15)) != plan['fingerprint']
+    assert verification.fingerprint(Config(mode='demo', password='z'*9, session_secret='w'*33)) == plan['fingerprint']   # not a secret's business
+
+
+def test_a_strategy_that_clears_every_bar_passes():
+    verdict = judge()
+    assert verdict['status'] == 'pass' and verdict['ready'] and not verdict['strategy_changed']
+    assert {c['key'] for c in verdict['checks']} == {'expectancy', 'benchmark_KRW', 'drawdown_KRW', 'best_days_KRW'}
+    assert all(c['ok'] for c in verdict['checks']) and verdict['ai_vs_rule'] == {'count': 3}
+    assert [p['key'] for p in verdict['progress']] == ['days', 'trades', 'decisions']
+
+
+@pytest.mark.parametrize('over, failing', [
+    ({'index': 6.0}, 'benchmark_KRW'),                         # holding the index earned more
+    ({'drawdown': 5.5}, 'drawdown_KRW'),
+    ({'ci': (-.1, 1.7)}, 'expectancy'),                        # positive on average, but not surely
+    ({'expectancy': -.2, 'ci': (-.9, .5)}, 'expectancy'),
+    ({'changes': (100_000, -10_000, -10_000, 5_000, 5_000)}, 'best_days_KRW'),   # one lucky day carried it
+    ({'groups': {'leveraged': {'count': 4}, 'plain': {'expectancy_pct': -.3}}}, 'without_leverage'),
+])
+def test_one_missed_bar_fails_the_strategy(over, failing):
+    verdict = judge(**over)
+    assert verdict['status'] == 'fail' and [c['key'] for c in verdict['checks'] if c['ok'] is False] == [failing]
+
+
+@pytest.mark.parametrize('over', [{'days': 30}, {'closed': 29}, {'decisions': 99}])
+def test_nothing_is_decided_before_the_period_and_the_samples_are_complete(over):
+    assert judge(**over)['status'] == 'collecting'
+    assert judge(index=9.0, **over)['status'] == 'collecting'                                 # not even a failure
+
+
+def test_a_check_that_cannot_be_computed_yet_keeps_it_collecting():
+    assert judge(index=None)['status'] == 'collecting'
+    assert judge(ci=None)['status'] == 'collecting'
+    assert judge(changes=(1, 2, 3))['status'] == 'collecting'                                 # three days are not enough to drop three
+    assert judge(index=None, drawdown=9.0)['status'] == 'fail'                                # but a known failure is a failure
+
+
+def test_a_change_of_strategy_halfway_is_flagged():
+    plan = verification.start(Config(mode='demo', password='x'*8, session_secret='y'*32, fee_kr=15), NOW-60*DAY)
+    assert judge(plan=plan)['strategy_changed'] and not judge()['strategy_changed']
+
+
+def test_an_experiment_without_a_plan_has_no_verdict():
+    assert verification.judge({}, tracking={}, report={}, evaluation={}, config=CFG, now=NOW) is None
+
+
+def test_daily_changes_start_from_the_seed():
+    assert verification.daily_changes({'2026-08-02': 120, '2026-08-01': 110}, 100) == [10, 10]
+
+
+# ---- the rule-follow baseline ----------------------------------------------------------------------------------------------
+
+def scored(stance, move, trigger, cost=40):
+    entry = evaluation.record_decision({}, run_id='r', symbol='A1', market='KR', decision={'stance': stance}, quote={'bid': 100, 'ask': 100},
+                                       candidates={}, selected_by='ai', cost_bps=cost, now=NOW, horizon='month', trigger_side=trigger)
+    entry['outcomes']['d5'] = {'returns': {'A1': move}}
+    return entry
+
+
+def test_the_ai_is_scored_against_simply_following_the_rule_that_started_the_analysis():
+    records = [scored('HOLD', 2.0, 'BUY'), scored('BUY', -1.0, 'BUY'), scored('HOLD', -3.0, 'SELL'), scored('BUY', 1.0, None)]
+    assert 'trigger_side' not in records[-1]
+    row = evaluation.summarize(records)['horizons']['d5']['ai_vs_rule']
+    # AI: 0, -1.4, 0 ; rule: +1.6, -1.4, +2.6 (a sell avoids the fall, less the cost)
+    assert row['count'] == 3 and row['ai_avg_net_pct'] == pytest.approx(-1.4/3, abs=1e-3)
+    assert row['rule_avg_net_pct'] == pytest.approx((1.6-1.4+2.6)/3, abs=1e-3)
+    assert row['diff_avg_pct'] == pytest.approx((-1.6+0-2.6)/3, abs=1e-3) and row['diff_ci_pct'][0] < row['diff_avg_pct']
+    assert evaluation.summarize([])['horizons']['d5']['ai_vs_rule']['count'] == 0
+
+
+def test_a_month_analysis_started_by_a_rule_records_what_the_rule_said(desk):
+    desk.provider.daily['005930'] = bars(series(70000, 'up'))
+    state = run_cycle(desk)
+    assert state['evaluations'][-1]['trigger_side'] == 'BUY'
+    assert state['trades'][-1]['origin'] == 'ai' and not state['trades'][-1].get('reused')
+    desk.request_cycle('000660')                                                              # the owner's request is not a rule
+    desk.cycle()
+    assert 'trigger_side' not in desk.store.read()['evaluations'][-1]
+
+
+# ---- on a ledger ----------------------------------------------------------------------------------------------------------
+
+def test_a_new_month_experiment_fixes_its_plan_and_the_page_gets_the_verdict_and_the_report_card(desk):
+    state = desk.store.read()
+    assert state['verification']['fingerprint'] == verification.fingerprint(desk.c)
+    page = desk.public_state()
+    assert page['verification']['status'] == 'collecting' and page['scorecard']['closed'] == 0
+    desk.stop()
+    desk.new_experiment(1000, 1000, 'basic', strategy_mode='legacy')
+    assert 'verification' not in desk.store.read() and desk.public_state()['verification'] is None
+
+
+def test_the_benchmark_is_read_at_most_every_fifteen_minutes_and_starts_fresh_with_a_new_experiment(desk):
+    desk.refresh_benchmark(now=time.time())
+    bench = desk.store.read()['benchmark']
+    assert set(bench) == {'KRW', 'USD'} and bench['KRW']['symbol'] == '069500' and bench['USD']['symbol'] == 'SPY'
+    calls = []
+    desk.daily_bars = lambda symbol, now=None: calls.append(symbol) or []
+    desk.refresh_benchmark(now=time.time())
+    assert calls == []
+    desk.refresh_benchmark(now=time.time()+901)
+    assert sorted(calls) == ['069500', 'SPY']
+    desk.stop()
+    desk.new_experiment(1_000_000, 1000, 'next', strategy_mode='intraday', strategy_settings={'horizon': 'month', 'universe_mode': 'fixed'})
+    assert 'benchmark' not in desk.store.read()
+
+
+def test_the_equity_of_each_day_is_kept_for_far_longer_than_the_minute_history():
+    state = {'cash': {'KRW': 100.0, 'USD': 10.0}, 'positions': {}, 'quotes': {}, 'initial': {'KRW': 100.0, 'USD': 10.0}}
+    for day in range(scorecard_days := 410):
+        record_performance(state, now=NOW+day*DAY, force=True)
+    daily = state['performance']['KRW']['daily']
+    assert len(daily) == 400 and min(daily) > '2027' and all(v == 100.0 for v in daily.values())
+    assert scorecard_days == 410 and scorecard.BENCHMARKS == {'KRW': '069500', 'USD': 'SPY'}
+
+
+def test_a_position_sold_in_pieces_is_one_round_trip_until_nothing_is_left():
+    closed, still = round_trips([fill(1, '005930', 'BUY', 10, 100.0), fill(2, '005930', 'SELL', 6, 110.0, realized=59.0),
+                                 fill(3, '005930', 'SELL', 4, 120.0, realized=79.0)])
+    assert len(closed) == 1 and closed[0]['pnl'] == 138.0 and still == []

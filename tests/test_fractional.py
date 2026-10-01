@@ -396,12 +396,11 @@ def experiment(**over):
     return body
 
 
-def test_the_position_limit_defaults_by_investment_horizon_and_can_be_set(client):
-    assert client.post('/api/experiments', json=experiment(horizon='intraday', max_holding_minutes=120)).status_code == 200
-    assert client.get('/api/state').json()['strategy_settings']['max_position_pct'] == 100
+def test_the_position_limit_defaults_to_thirty_percent_and_can_be_set(client):
     assert client.post('/api/experiments', json=experiment()).status_code == 200
     assert client.get('/api/state').json()['strategy_settings']['max_position_pct'] == 30
-    assert client.post('/api/experiments', json=experiment(horizon='intraday', max_holding_minutes=120, max_position_pct=50, max_order_pct=100)).status_code == 200
+    assert client.post('/api/experiments', json=experiment(horizon='intraday', max_holding_minutes=120)).status_code == 409   # removed
+    assert client.post('/api/experiments', json=experiment(max_position_pct=50, max_order_pct=100)).status_code == 200
     state = client.get('/api/state').json()
     assert state['strategy_settings']['max_position_pct'] == 50 and state['config'] is not None
     for bad in ({'max_position_pct': 5}, {'max_position_pct': 101}, {'max_order_pct': 101}, {'max_order_pct': 0}):

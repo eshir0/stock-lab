@@ -9,6 +9,7 @@ Nothing here changes trading; it only measures whether the AI's calls beat doing
 import math
 
 from .rules import RULES
+from .scorecard import mean_ci
 
 HORIZONS = (30, 60)
 DAY_HORIZONS = (1, 5, 21)                    # trading days
@@ -33,7 +34,7 @@ def expected(entry):
 
 
 def record_decision(s, *, run_id, symbol, market, decision, quote, candidates, selected_by, cost_bps, now, rules=None,
-                    horizon='intraday', reused=False):
+                    horizon='intraday', reused=False, trigger_side=None):
     price = mid(quote)
     if price is None:
         return None
@@ -44,6 +45,8 @@ def record_decision(s, *, run_id, symbol, market, decision, quote, candidates, s
              'candidates': {k: v for k, v in candidates.items() if v}, 'rules': dict(rules or {}), 'outcomes': {}}
     if reused:
         entry['reused'] = True                    # the analysis reused earlier research (reuse.py)
+    if trigger_side in ('BUY', 'SELL'):
+        entry['trigger_side'] = trigger_side      # what the rule that started the analysis said: the "AI 없이 규칙대로" baseline
     records = s.setdefault('evaluations', [])
     records.append(entry)
     del records[:-MAX_RECORDS]
@@ -172,6 +175,17 @@ def _rule_rows(scored, move, key):
     return rows
 
 
+def _ai_vs_rule(scored, move):
+    """The AI's call against simply following the rule that triggered the analysis, on the same moments at the same cost.
+    Every month analysis starts from a rule signal, so this is what the AI's veto (or its own SELL) is worth."""
+    paired = [e for e in scored if e.get('trigger_side') in ('BUY', 'SELL')]
+    ai = [_net(e['stance'], move[id(e)], e['cost_bps']) for e in paired]
+    rule = [_net(e['trigger_side'], move[id(e)], e['cost_bps']) for e in paired]
+    mean, low, high = mean_ci([a-b for a, b in zip(ai, rule)])
+    return {'count': len(paired), 'ai_avg_net_pct': _avg(ai), 'rule_avg_net_pct': _avg(rule), 'diff_avg_pct': mean,
+            'diff_ci_pct': [low, high] if low is not None else None}
+
+
 def summarize(records):
     """Plain numbers for the dashboard: what the AI did versus 'always hold' and 'always buy'."""
     horizons = {}
@@ -201,6 +215,7 @@ def summarize(records):
                      'missed_gain_rate_pct': _rate([move[id(e)] > e['cost_bps']/100 for e in holds])},
             'ai_avg_net_pct': _avg(ai), 'always_hold_pct': 0.0 if scored else None,
             'rules': _rule_rows(scored, move, key),
+            'ai_vs_rule': _ai_vs_rule(scored, move),
             'always_buy_avg_net_pct': _avg(always_buy),
             'selector': {'count': len(picks), 'chosen_abs_move_pct': _avg([p[0] for p in picks]),
                          'others_abs_move_pct': _avg([p[1] for p in picks]),

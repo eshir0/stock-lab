@@ -482,9 +482,10 @@ def experiment(**over):
 
 
 def test_the_experiment_form_accepts_both_universe_modes_and_defaults_to_the_daily_list(client):
-    assert client.post('/api/experiments', json=experiment()).status_code == 200
+    month = {'horizon': 'month', 'max_holding_minutes': 43200}                    # day trading was removed: month plans only
+    assert client.post('/api/experiments', json=experiment(**month)).status_code == 200
     assert client.get('/api/state').json()['strategy_settings']['universe_mode'] == 'daily_focus'
-    assert client.post('/api/experiments', json=experiment(universe_mode='fixed')).status_code == 200
+    assert client.post('/api/experiments', json=experiment(universe_mode='fixed', **month)).status_code == 200
     state = client.get('/api/state').json()
     assert state['strategy_settings']['universe_mode'] == 'fixed' and state['focus_config']['mode'] == 'fixed'
     assert [i['symbol'] for i in state['instruments']] == [i['symbol'] for i in INSTRUMENTS]

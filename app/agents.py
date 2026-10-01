@@ -565,11 +565,46 @@ def validate_report(report, role, context, sources, desk=False):
     return report
 
 
+CHECK_SCHEMA = {'type': 'object', 'properties': {'ok': {'type': 'boolean'}}, 'required': ['ok'], 'additionalProperties': False}
+
+
 class Agents:
     def __init__(self, config, store):
         self.c, self.store = config, store
         self.gate = UsageGate(config, fetch=self.fetch_usage)
         self.cycle_order = None      # providers chosen for the running cycle, best first
+        self.answered = {}           # provider -> time of its last valid answer (in this process)
+
+    def self_check(self, provider):
+        """One tiny request through the bridge to see that a provider really answers with its configured model (used for a
+        fallback that has not answered for a while). Returns {'ok', 'seconds', 'model', 'message'}; never raises."""
+        started = time.time()
+        result = {'ok': False, 'model': '', 'message': ''}
+        try:
+            r = httpx.post(self.c.bridge_url.strip().rstrip('/')+'/generate',
+                           json={'provider': provider, 'system': '연결 확인용 요청입니다. ok를 true로 답하세요.', 'prompt': '{}',
+                                 'schema': CHECK_SCHEMA, 'search': False, 'tier': ''},
+                           headers={'Authorization': 'Bearer '+self.c.bridge_token.strip()}, timeout=330)
+            r.raise_for_status()
+            data = r.json()
+        except (httpx.HTTPError, ValueError):
+            data = None
+        if not isinstance(data, dict):
+            result['message'] = '중계 서비스에 연결하지 못했습니다.'
+        elif not data.get('ok'):
+            if data.get('exhausted'):
+                self.gate.observe(provider, cooldown_until=data.get('until'))
+            result['message'] = str(data.get('message') or '응답 실패')[:200]
+        else:
+            self.gate.observe(provider, limits=data.get('limits'))
+            result.update(ok=isinstance(data.get('data'), dict) and data['data'].get('ok') is True,
+                          model=str(data.get('model') or provider)[:60])
+            if result['ok']:
+                self.answered[provider] = time.time()
+            else:
+                result['message'] = '응답 형식이 예상과 다릅니다.'
+        result['seconds'] = round(time.time()-started)
+        return result
 
     def fetch_usage(self):
         """{provider: {...}} from the bridge's /usage, or None when it cannot be reached."""
@@ -706,7 +741,8 @@ class Agents:
         try:
             r = httpx.post(self.c.bridge_url.strip().rstrip('/')+'/generate',
                            json={'provider': provider, 'system': instructions, 'prompt': prompt,
-                                 'schema': schema, 'search': search},
+                                 'schema': schema, 'search': search,
+                                 'tier': 'light' if role in getattr(self.c, 'ai_light_roles', ()) else ''},
                            headers={'Authorization': 'Bearer '+self.c.bridge_token.strip()}, timeout=330)
             r.raise_for_status()
             data = r.json()
@@ -727,6 +763,7 @@ class Agents:
         except (ValueError, TypeError, KeyError):
             raise ProviderError(f'[{label} 응답 검증 실패] 형식·전략 수치·근거를 검증하지 못했습니다.') from None
         self.gate.observe(provider, limits=data.get('limits'))
+        self.answered[provider] = time.time()
         total = (data.get('usage') or {}).get('total_tokens') if isinstance(data.get('usage'), dict) else None
         report['usage'] = {'total_tokens': total} if type(total) is int and total > 0 else {}
         report['search_entry_point'] = ''

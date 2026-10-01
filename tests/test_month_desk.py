@@ -390,13 +390,12 @@ def test_a_new_experiment_is_a_month_swing_by_default(client):
     assert settings['horizon'] == 'month' and settings['max_holding_minutes'] == 43200
 
 
-def test_the_holding_limit_must_fit_the_chosen_horizon(client):
+def test_the_holding_limit_must_fit_a_month_plan_and_day_trading_can_no_longer_be_started(client):
     assert client.post('/api/experiments', json=experiment(max_holding_minutes=10080)).status_code == 200
     assert client.get('/api/state').json()['strategy_settings']['max_holding_minutes'] == 10080
     assert client.post('/api/experiments', json=experiment(max_holding_minutes=120)).status_code == 409        # too short for a month plan
-    assert client.post('/api/experiments', json=experiment(horizon='intraday', max_holding_minutes=120)).status_code == 200
-    assert client.get('/api/state').json()['strategy_settings']['horizon'] == 'intraday'
-    assert client.post('/api/experiments', json=experiment(horizon='intraday')).status_code == 200              # its own default (120)
-    assert client.get('/api/state').json()['strategy_settings']['max_holding_minutes'] == 120
+    refused = client.post('/api/experiments', json=experiment(horizon='intraday', max_holding_minutes=120))
+    assert refused.status_code == 409 and '단타' in refused.text                                              # removed 2026-10-01
+    assert client.get('/api/state').json()['strategy_settings']['horizon'] == 'month'
     assert client.post('/api/experiments', json=experiment(horizon='year')).status_code == 422
     assert client.post('/api/experiments', json=experiment(max_holding_minutes=50000)).status_code == 422

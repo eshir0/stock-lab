@@ -1,0 +1,148 @@
+"""Report card of the trades themselves, a market benchmark to compare with, and the statistics the verification plan uses.
+
+A trade is judged from its own fills: a round trip runs from the first buy of a name (nothing held) to the sell that leaves
+nothing held, and its result is what the ledger really booked - every fee and tax included. `report` turns the round trips
+into the numbers a decision about real money needs: how often it wins, by how much, the expectancy and how sure we can be
+of it. `benchmark_entry` follows an index ETF bought at the start of the experiment and simply held.
+
+Pure functions over plain dicts; nothing here trades or calls a service.
+"""
+import math
+from decimal import Decimal
+
+from . import shares
+from .instruments import SYMBOLS
+
+BENCHMARKS = {'KRW': '069500', 'USD': 'SPY'}     # KODEX 200 and SPDR S&P 500: what simply holding the market earned
+# Two-sided 95% Student-t critical values by degrees of freedom. Between rows the smaller df (the wider interval) is used,
+# so a small sample is never treated as surer than it is; beyond the table the normal value applies.
+T95 = ((1, 12.706), (2, 4.303), (3, 3.182), (4, 2.776), (5, 2.571), (6, 2.447), (7, 2.365), (8, 2.306), (9, 2.262),
+       (10, 2.228), (12, 2.179), (15, 2.131), (20, 2.086), (25, 2.060), (30, 2.042), (40, 2.021), (60, 2.000), (120, 1.980))
+RECENT = 20                                      # closed round trips listed on the dashboard
+
+
+def t95(df):
+    if df < 1:
+        return None
+    if df > 120:
+        return 1.96
+    return next(t for key, t in reversed(T95) if df >= key)
+
+
+def mean_ci(values):
+    """(mean, low, high): the mean and a 95% confidence interval for it. low/high are None below two values."""
+    values = [float(v) for v in values]
+    n = len(values)
+    if not n:
+        return None, None, None
+    mean = sum(values)/n
+    if n < 2:
+        return round(mean, 4), None, None
+    sd = math.sqrt(sum((v-mean)**2 for v in values)/(n-1))
+    half = t95(n-1)*sd/math.sqrt(n)
+    return round(mean, 4), round(mean-half, 4), round(mean+half, 4)
+
+
+def _origin(trade):
+    origin = trade.get('origin')
+    if origin in ('watch', 'ai'):
+        return origin
+    return 'watch' if trade.get('entry_watch') else 'ai'
+
+
+def _close(trip, when):
+    invested, pnl = trip['invested'], trip['pnl']
+    return {'symbol': trip['symbol'], 'name': trip['name'], 'currency': trip['currency'], 'opened': trip['opened'],
+            'closed': when, 'days': round((when-trip['opened'])/86400, 2), 'pnl': round(float(pnl), 2),
+            'return_pct': round(float(pnl/invested*100), 4) if invested > 0 else 0.0, 'leveraged': trip['leveraged'],
+            'origin': trip['origin'], 'reused': trip['reused'], 'exit_reason': trip.get('exit_reason', '')}
+
+
+def round_trips(trades):
+    """(closed round trips, open ones), oldest first, built from the ledger's fills. A sell without a recorded buy is ignored."""
+    holding, closed = {}, []
+    for t in sorted(trades, key=lambda x: x.get('time', 0)):
+        symbol, side = t.get('symbol'), t.get('side')
+        if symbol not in SYMBOLS or side not in ('BUY', 'SELL'):
+            continue
+        qty = shares.dec(t['quantity'])
+        trip = holding.get(symbol)
+        if side == 'BUY':
+            if trip is None:
+                item = SYMBOLS[symbol]
+                trip = holding[symbol] = {'symbol': symbol, 'name': item['name'], 'currency': item['currency'],
+                                          'opened': t['time'], 'held': Decimal(0), 'invested': Decimal(0), 'pnl': Decimal(0),
+                                          'leveraged': bool(item.get('leveraged_etf')), 'origin': _origin(t),
+                                          'reused': bool(t.get('reused'))}
+            trip['held'] += qty
+            trip['invested'] += Decimal(str(t['price']))*qty+Decimal(str(t.get('fee') or 0))
+        elif trip is not None:
+            trip['held'] -= qty
+            trip['pnl'] += Decimal(str(t.get('realized') or 0))
+            trip['exit_reason'] = t.get('exit_reason') or ('전량 매도' if t.get('liquidation') else '')
+            if trip['held'] <= 0:
+                closed.append(_close(trip, t['time']))
+                del holding[symbol]
+    return closed, list(holding.values())
+
+
+def _avg(values):
+    return round(sum(values)/len(values), 4) if values else None
+
+
+def group(trips):
+    """Count, win rate, expectancy and its confidence interval of some round trips."""
+    returns = [t['return_pct'] for t in trips]
+    mean, low, high = mean_ci(returns)
+    return {'count': len(trips), 'win_rate_pct': round(sum(r > 0 for r in returns)/len(returns)*100, 1) if returns else None,
+            'expectancy_pct': mean, 'ci_pct': [low, high] if low is not None else None}
+
+
+def report(trades):
+    """The trade report card. Returns are per round trip in percent of what was invested (fees and taxes included); a round
+    trip that ends exactly even counts as a loss."""
+    closed, holding = round_trips(trades)
+    returns = [t['return_pct'] for t in closed]
+    wins, losses = [r for r in returns if r > 0], [r for r in returns if r <= 0]
+    base = group(closed)
+    avg_win, avg_loss = _avg(wins), _avg(losses)
+    lost = abs(sum(losses))
+    pnl = {}
+    for t in closed:
+        pnl[t['currency']] = round(pnl.get(t['currency'], 0.0)+t['pnl'], 2)
+    return {'closed': len(closed), 'open': len(holding), 'wins': len(wins), 'losses': len(losses),
+            'win_rate_pct': base['win_rate_pct'], 'avg_win_pct': avg_win, 'avg_loss_pct': avg_loss,
+            'payoff': round(avg_win/abs(avg_loss), 3) if avg_win is not None and avg_loss else None,
+            'profit_factor': round(sum(wins)/lost, 3) if lost > 0 else None,
+            'expectancy_pct': base['expectancy_pct'], 'ci_pct': base['ci_pct'],
+            'avg_days': _avg([t['days'] for t in closed]), 'best_pct': max(returns) if returns else None,
+            'worst_pct': min(returns) if returns else None, 'pnl': pnl,
+            'groups': {'leveraged': group([t for t in closed if t['leveraged']]),
+                       'plain': group([t for t in closed if not t['leveraged']]),
+                       'watch': group([t for t in closed if t['origin'] == 'watch']),
+                       'analysis': group([t for t in closed if t['origin'] != 'watch']),
+                       'reused': group([t for t in closed if t['reused']]),
+                       'fresh': group([t for t in closed if not t['reused']])},
+            'recent': closed[-RECENT:][::-1]}
+
+
+def benchmark_entry(symbol, bars, started_at, previous=None):
+    """An index ETF bought at the last completed close at or before the experiment's start and simply held: its return and
+    worst drawdown to the latest completed close. Once set, the starting close never moves. None until bars exist."""
+    bars = [b for b in bars or [] if isinstance(b.get('close'), (int, float)) and b['close'] > 0]
+    if previous and previous.get('symbol') == symbol and previous.get('start_close'):
+        start_time, start = previous['start_time'], previous['start_close']
+    else:
+        before = [b for b in bars if b['time'] <= started_at]
+        if not before:
+            return previous
+        start_time, start = before[-1]['time'], before[-1]['close']
+    after = [b for b in bars if b['time'] > start_time]
+    last = after[-1] if after else {'time': start_time, 'close': start}
+    peak, worst = start, 0.0
+    for close in [start]+[b['close'] for b in after]:
+        peak = max(peak, close)
+        worst = max(worst, (peak-close)/peak*100)
+    return {'symbol': symbol, 'name': SYMBOLS[symbol]['name'], 'start_time': start_time, 'start_close': start,
+            'last_time': last['time'], 'last_close': last['close'], 'return_pct': round((last['close']/start-1)*100, 3),
+            'max_drawdown_pct': round(worst, 3)}

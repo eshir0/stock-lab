@@ -64,13 +64,27 @@ class Config:
     # A buy is refused when its take-profit is narrower than this many times the round-trip cost (fees, slippage, Korean sell tax and the
   # quoted spread): a target that small is eaten by the costs. 0 turns the rule off (see risk.size_order).
     min_take_cost_ratio: float = max(0.0, float(os.getenv('MIN_TAKE_COST_RATIO', '3')))
+    # Model tiering: these roles ask the bridge for its lighter model (CLAUDE_MODEL_LIGHT / CODEX_MODEL_LIGHT, when set); the
+    # selector, the critic, the director and the morning brief keep the main one. Research summarises sources while the decision
+    # keeps the strongest model, and an analysis costs a smaller share of the subscription. Empty runs every role on the main model.
+    ai_light_roles: tuple = tuple(r.strip() for r in os.getenv('AI_LIGHT_ROLES', 'planner,fundamental,technical,news').split(',')
+                                  if r.strip())
+    # The bridge's models, read here only so the verification fingerprint notices a change of model.
+    claude_model: str = os.getenv('CLAUDE_MODEL', '')
+    claude_model_light: str = os.getenv('CLAUDE_MODEL_LIGHT', '')
+    codex_model: str = os.getenv('CODEX_MODEL', '')
+    # Phone notifications (notify.py): an ntfy topic URL or any endpoint taking a plain-text POST. Empty sends nothing.
+    notify_url: str = os.getenv('NOTIFY_URL', '')
     research_reuse_seconds: int = max(0, int(os.getenv('RESEARCH_REUSE_SECONDS', '3600')))
     research_reuse_move_pct: float = max(.1, float(os.getenv('RESEARCH_REUSE_MOVE_PCT', '1.5')))
     proposal_seconds: int = 180
     quote_age: int = 30
-    fee_kr: float = float(os.getenv('FEE_KR_BPS', '15'))
-    fee_us: float = float(os.getenv('FEE_US_BPS', '15'))
-    sell_tax_kr: float = float(os.getenv('SELL_TAX_KR_BPS', '0'))
+    # Costs follow the real 2026 schedule (Toss Securities): domestic commission 0.015% a side, US commission 0.1% a side (an
+    # order of $10 or less is free), and Korea's securities transaction tax of 0.20% on selling a listed STOCK (ETFs are exempt,
+    # see risk.trade_fee). Slippage is an assumption on top of crossing the quoted spread.
+    fee_kr: float = float(os.getenv('FEE_KR_BPS', '1.5'))
+    fee_us: float = float(os.getenv('FEE_US_BPS', '10'))
+    sell_tax_kr: float = float(os.getenv('SELL_TAX_KR_BPS', '20'))
     slippage_bps: float = float(os.getenv('SLIPPAGE_BPS', '5'))
 
     def validate_ai(self):

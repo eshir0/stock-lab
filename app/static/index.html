@@ -85,7 +85,8 @@
 <details class="more"><summary>제외된 종목과 이유</summary><div id="focus-excluded" class="focus-excluded"></div></details>
 </section>
 <section class="panel team-panel" id="sec-agents"><div class="section-title"><div><p class="eyebrow">AGENT DESK</p><h2>에이전트 데스크</h2><p class="muted small" id="team-context">실행하면 역할별 분석이 이곳에 쌓입니다.</p></div><div class="inline-controls"><select id="analyze-symbol" aria-label="분석 종목"></select><button id="analyze" class="secondary">지금 분석</button></div></div><p id="research-flow" class="research-flow small muted"></p><p id="intel-status" class="intel-status small muted"></p><p id="gate-status" class="gate-status small muted" hidden></p><div id="team" class="team"></div><div id="sizing-summary" class="sizing-summary" hidden></div><div id="reports" class="reports"></div></section>
-<section class="panel eval-panel" id="sec-eval" aria-label="AI 판단 검증"><div class="section-title"><div><p class="eyebrow">VERIFICATION</p><h2>AI 판단 검증</h2><p class="muted small">1개월 스윙 판단은 판단일 이후 1·5·21거래일째 일봉 종가로, 당일 단타 판단은 30분·60분 뒤 중간가격으로 채점합니다. 비용은 왕복 수수료·슬리피지·스프레드를 차감합니다.</p></div><span id="eval-sample" class="pill">표본 0건</span></div>
+<section class="panel eval-panel" id="sec-eval" aria-label="AI 판단 검증"><div class="section-title"><div><p class="eyebrow">VERIFICATION</p><h2>검증 계획 · AI 판단 채점</h2><p class="muted small">먼저 이 실험이 실제 돈을 맡길 만한지 미리 고정한 기준으로 판정하는 검증 계획과 거래 성적표를 보여 줍니다. 그 아래는 AI의 매매 판단을 판단일 이후 1·5·21거래일째 일봉 종가로 채점한 결과이며, 실제 요율의 수수료·국내 주식 거래세와 슬리피지·스프레드를 차감합니다.</p></div><span id="eval-sample" class="pill">표본 0건</span></div>
+<div id="verify-panel" class="verify-panel"></div>
 <div class="eval-chart-head"><h3>한눈에 비교 <small class="muted">평균 순수익률(비용 차감)</small></h3><div id="eval-tabs" class="seg" role="group" aria-label="채점 기준 시간"></div></div>
 <div id="eval-chart" class="hbars"></div>
 <details class="more" open><summary>표로 자세히 보기</summary><div id="eval-summary"></div><div class="table-wrap"><table><thead><tr id="eval-recent-head"><th>시각</th><th>종목</th><th>판단</th><th>선정</th><th>AI</th><th>처리</th></tr></thead><tbody id="eval-recent"></tbody></table></div></details></section>
@@ -105,17 +106,17 @@
 <label class="field-label" for="strategy-mode">분석 전략</label><select id="strategy-mode" name="strategy_mode"><option value="intraday">전문가팀 · 종목 선정과 위험 관리</option><option value="legacy">기본 분석 · 기존 방식</option></select>
 <p id="strategy-form-description" class="muted small">플래너 → 기업·차트·뉴스 조사 → 반대 검토 → 디렉터 순서로 분석하고, 목표 비중과 손절 위험을 바탕으로 수량을 정합니다.</p>
 <fieldset id="intraday-settings" class="strategy-fields"><legend>매매 기간과 위험 기준</legend>
-<label class="field-label" for="horizon">투자 기간</label><select id="horizon" name="horizon"><option value="month">1개월 스윙 (권장) · 최대 30일 보유, 밤새 보유</option><option value="intraday">당일 단타 · 장 마감 전 청산</option></select>
+<label class="field-label" for="horizon">투자 기간</label><select id="horizon" name="horizon"><option value="month">1개월 스윙 · 최대 30일 보유, 밤새 보유</option></select>
 <p id="horizon-description" class="muted small"></p>
 <label class="checkbox-label" for="include-leveraged-etfs"><input id="include-leveraged-etfs" name="include_leveraged_etfs" type="checkbox" checked><span>레버리지·인버스 ETF를 관심종목에 포함</span></label>
 <p class="muted small">ETF 자체의 시세로 모의매매합니다. 계좌에서 돈을 빌리거나 주식을 공매도하지 않습니다.</p>
-<label class="field-label" for="universe-mode">종목 구성 방식</label><select id="universe-mode" name="universe_mode"><option value="daily_focus">일일 집중 종목 (권장) · 매일 아침 데이터와 뉴스로 시장별 선정 (단타는 변동성 큰 종목, 1개월 스윙은 상승 추세 종목 위주)</option><option value="fixed">고정 종목 · 삼성전자·SK하이닉스·Apple·Microsoft와 레버리지 ETF</option></select>
+<label class="field-label" for="universe-mode">종목 구성 방식</label><select id="universe-mode" name="universe_mode"><option value="daily_focus">일일 집중 종목 (권장) · 매일 아침 데이터와 뉴스로 시장별 선정 (상승 추세 종목 위주)</option><option value="fixed">고정 종목 · 삼성전자·SK하이닉스·Apple·Microsoft와 레버리지 ETF</option></select>
 <p class="muted small">일일 집중 종목은 개장 90분 전에 계산하고 그날 목록 밖의 종목은 신규 매수하지 않습니다. 계산에 실패하면 고정 종목으로 진행합니다. 이미 보유한 종목은 추세가 유지되면 그대로 두고, 꺾이면 개장 후 매도합니다.</p>
 <div class="risk-inputs"><div><label class="field-label" for="risk-per-trade">1회 손절 위험 한도 · %</label><input id="risk-per-trade" name="risk_per_trade_pct" type="number" min="0.1" max="2" step="0.1" value="0.5" required inputmode="decimal"></div><div><label class="field-label" for="daily-loss-limit">일중 손실 한도 · %</label><input id="daily-loss-limit" name="daily_loss_limit_pct" type="number" min="1" max="10" step="0.5" value="2" required inputmode="decimal"></div><div><label class="field-label" for="max-holding" id="max-holding-label">최대 보유 기간 · 일</label><input id="max-holding" name="max_holding" type="number" min="1" max="30" step="1" value="30" required inputmode="numeric"></div></div>
 <p class="muted small">손절 위험은 해당 통화의 평가자산을 기준으로 수량을 제한합니다. 일중 손실 한도에 도달한 통화는 신규 매수를 막고, 실행 중인 청산 감시는 유지합니다. 급변·갭·호가 부족 시 계획한 손실이나 보유 기간을 초과할 수 있습니다.</p>
 </fieldset>
 <div class="risk-inputs"><div><label class="field-label" for="max-order-pct">1회 매수 한도 · %</label><input id="max-order-pct" name="max_order_pct" type="number" min="1" max="100" step="1" value="30" required inputmode="numeric"></div><div><label class="field-label" for="max-position-pct">종목당 최대 비중 · %</label><input id="max-position-pct" name="max_position_pct" type="number" min="10" max="100" step="1" value="30" required inputmode="numeric"></div></div>
-<p class="muted small">해당 통화의 현재 평가자산(원금이 아님) 대비 비율입니다. 한 번에 살 수 있는 금액과 한 종목이 차지할 수 있는 비중을 따로 정합니다(1개월 스윙 30%, 당일 단타 100%가 기본). 국내 종목은 정수 주식이라 1주 가격이 이 한도를 넘으면 살 수 없고, 미국 종목은 소수점 수량으로 살 수 있습니다.</p>
+<p class="muted small">해당 통화의 현재 평가자산(원금이 아님) 대비 비율입니다. 한 번에 살 수 있는 금액과 한 종목이 차지할 수 있는 비중을 따로 정합니다(기본 30%). 국내 종목은 정수 주식이라 1주 가격이 이 한도를 넘으면 살 수 없고, 미국 종목은 소수점 수량으로 살 수 있습니다.</p>
 <p class="muted small">사용하지 않는 통화는 0으로 둘 수 있습니다. 최소 한 통화의 원금은 0보다 커야 합니다. 새 실험은 중지·직접 승인 상태로 시작합니다.</p>
 <p id="experiment-error" class="form-error" role="alert"></p>
 <div class="dialog-actions"><button id="experiment-cancel" class="secondary" type="button">돌아가기</button><button id="experiment-create" class="primary" type="submit">새 실험 시작</button></div>

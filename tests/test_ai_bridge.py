@@ -231,3 +231,28 @@ def test_health_stays_unauthenticated_and_shows_only_cooldowns():
     request = FakeRequest('/health', '')
     request.do_GET()
     assert request.sent[0] == 200 and set(request.sent[1]) == {'ok', 'cooldown'}
+
+
+# ---- model tiering ------------------------------------------------------------------------------------------------------------
+
+def test_a_light_call_runs_on_the_light_model_when_one_is_set():
+    env = {'CLAUDE_MODEL': 'claude-opus-5-5', 'CLAUDE_MODEL_LIGHT': 'claude-sonnet-5-5', 'CLAUDE_EFFORT': 'Medium',
+           'CODEX_MODEL': 'gpt-6.1-sol', 'CODEX_EFFORT': 'high'}
+    assert ai_bridge.pick(env, 'claude', 'light') == ('claude-sonnet-5-5', 'medium')
+    assert ai_bridge.pick(env, 'claude', '') == ('claude-opus-5-5', 'medium')
+    assert ai_bridge.pick(env, 'codex', 'light') == ('gpt-6.1-sol', 'high')                 # no light Codex model: the main one
+    assert ai_bridge.pick(dict(env, CLAUDE_EFFORT_LIGHT='low'), 'claude', 'light') == ('claude-sonnet-5-5', 'low')
+    assert ai_bridge.pick(dict(env, CLAUDE_EFFORT_LIGHT='low'), 'claude', '') == ('claude-opus-5-5', 'medium')
+    assert ai_bridge.pick({}, 'claude', 'light') == ('sonnet', '') and ai_bridge.pick({}, 'codex') == ('', '')
+
+
+def test_the_bridge_refuses_an_unknown_tier_and_passes_a_known_one_through(monkeypatch):
+    assert ai_bridge.generate({'provider': 'claude', 'system': 's', 'prompt': 'p', 'schema': {}, 'tier': 'max'})[0] == 400
+    seen = []
+    monkeypatch.setitem(ai_bridge.RUNNERS, 'claude', lambda env, system, prompt, schema, search, tier: seen.append(tier) or
+                        {'data': {}, 'sources': [], 'usage': {}, 'model': 'm', 'limits': None})
+    monkeypatch.setattr(ai_bridge, 'cooling', lambda provider: None)
+    monkeypatch.setattr(ai_bridge, 'note_limits', lambda provider, limits: None)
+    assert ai_bridge.generate({'provider': 'claude', 'system': 's', 'prompt': 'p', 'schema': {}, 'tier': 'light'})[0] == 200
+    assert ai_bridge.generate({'provider': 'claude', 'system': 's', 'prompt': 'p', 'schema': {}})[0] == 200
+    assert seen == ['light', '']
