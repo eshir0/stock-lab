@@ -16,8 +16,8 @@ cfg = Config(database_url='sqlite:////tmp/demo.db', mode='demo', password='demo-
 store = Store(cfg.database_url, cfg.mode)
 engine = Engine(cfg, store, DemoProvider())
 engine.boot()
-engine.new_experiment(1000000, 1000, '1개월 스윙 실험 1차', 30, 'intraday',
-                      {'include_leveraged_etfs': True, 'risk_per_trade_pct': .5, 'daily_loss_limit_pct': 2, 'horizon': 'month'})
+engine.new_experiment(1000000, 1000, '단타 실험 1차', 30, 'intraday',
+                      {'include_leveraged_etfs': True, 'risk_per_trade_pct': .5, 'daily_loss_limit_pct': 2, 'horizon': 'intraday', 'max_holding_minutes': 120, 'max_position_pct': 100})
 engine.refresh()
 seed_intel(engine)
 engine.set_execution('auto')
@@ -66,25 +66,6 @@ with store.edit() as s:
             for horizon in (30, 60):
                 returns = {x: round(random.gauss(drift*horizon/30, .55), 4) for x in [symbol, *others]}
                 entry['outcomes'][str(horizon)] = {'time': t+horizon*60, 'at_close': False, 'returns': returns}
-    # Month decisions scored on daily closes: 1, 5 and 21 trading days.
-    for i in range(12):
-        symbol, stance = random.choice(['005930', '000660', 'AAPL', 'MSFT']), random.choice(['BUY', 'BUY', 'HOLD', 'SELL'])
-        market = 'KR' if symbol[0].isdigit() else 'US'
-        t = now-(40-i*3)*86400
-        quote = {'bid': 100.0, 'ask': 100.0, 'asof': t, 'received': t, 'session_end': t+3600}
-        rules = {name: random.choice(['BUY', 'SELL', 'HOLD', None]) for name in RULES}
-        entry = record_decision(s, run_id=f'month-{i}', symbol=symbol, market=market, horizon='month',
-                                decision={'stance': stance, 'engine': 'Claude · claude-opus-5-5', 'target_weight_pct': 10}, quote=quote,
-                                candidates={'MSFT' if symbol != 'MSFT' else 'AAPL': 100.0}, selected_by='ai', cost_bps=40, now=t, rules=rules)
-        entry['action'] = 'filled' if stance != 'HOLD' else 'hold'
-        for key, scale in (('d1', .8), ('d5', 1.8), ('d21', 4.5)):
-            if now-t > {'d1': 1, 'd5': 7, 'd21': 30}[key]*86400:
-                entry['outcomes'][key] = {'time': now, 'at_close': True, 'trading_days': int(key[1:]),
-                                          'returns': {x: round(random.gauss(.4*scale/2, scale), 4) for x in (symbol, *entry['candidates'])}}
-    s['desk_gate'] = {'time': now-300, 'skipped': False, 'skipped_cycles': 7, 'checked': [
-        {'symbol': '005930', 'name': '삼성전자', 'held': False, 'eligible': True, 'reason': 'signal', 'rules': ['momentum', 'breakout'], 'signals': {'momentum': 'BUY', 'breakout': 'BUY'}},
-        {'symbol': '000660', 'name': 'SK하이닉스', 'held': False, 'eligible': False, 'reason': 'recent', 'rules': ['momentum'], 'signals': {'momentum': 'BUY'}},
-        {'symbol': 'AAPL', 'name': 'Apple', 'held': False, 'eligible': False, 'reason': 'no_signal', 'rules': [], 'signals': {}}]}
     # A few shadow orders that would have been blocked, for the readiness panel.
     for i, (sym, cur, side, qty, price, blocked) in enumerate([
             ('005930', 'KRW', 'BUY', 4, 70100, ['max-order', 'max-daily-notional']), ('TQQQ', 'USD', 'BUY', 1, 76.8, ['symbol-not-allowed']),
@@ -99,16 +80,24 @@ with store.edit() as s:
 from app.instruments import CATALOGUE
 import math
 _daily = {c['symbol']: .0012+(i % 7)*.0007 for i, c in enumerate(CATALOGUE)}
-_daily['NVDA'] = -.004                                    # a downtrend name, so the "excluded" list has real reasons
-_daily['AMD'] = .022                                      # stretched far above its 20-day average
+_spread = {c['symbol']: .012 for c in CATALOGUE}                       # a ~2.4% range: liquid but not lively
+for name in ('NVDA', 'TSLA', 'AMD', '000660', '012450', 'TQQQ', 'SQQQ', '122630', '034020', '329180'):
+    _spread[name] = .03                                              # lively names (~6% range)
+for name in ('AAPL', 'MSFT', 'SPY', 'QQQ', '069500', '005930'):
+    _spread[name] = .004                                             # calm: below the day-trading floor
+_spread['PLTR'] = .09                                                # far too wild
+_daily['META'] = -.035                                               # a five-day freefall
+_spread['META'] = .03
+_daily['AMZN'] = -.004                                               # a downtrend that still moves: allowed for a day trader
+_spread['AMZN'] = .03
 
-def _candles(symbol, interval='1d', _orig=engine.provider.candles):
+def _candles(symbol, interval='1d', count=None, _orig=engine.provider.candles):
     if interval != '1d':
         return _orig(symbol, interval)
     end = int(time.time()//86400)*86400
-    base = DemoProvider.__dict__['candles'] and 100.0
-    return [{'time': end-(40-i)*86400, 'open': base*(1+_daily[symbol])**i, 'high': base*(1+_daily[symbol])**i*1.01,
-             'low': base*(1+_daily[symbol])**i*.99, 'close': base*(1+_daily[symbol])**i, 'volume': 1e9, 'currency': 'USD',
+    base = 100.0
+    return [{'time': end-(40-i)*86400, 'open': base*(1+_daily[symbol])**i, 'high': base*(1+_daily[symbol])**i*(1+_spread[symbol]),
+             'low': base*(1+_daily[symbol])**i*(1-_spread[symbol]), 'close': base*(1+_daily[symbol])**i, 'volume': 1e9, 'currency': 'USD',
              'interval': '1d', 'completed': True} for i in range(40)]
 engine.provider.candles = _candles
 engine.focus_pause = 0
@@ -117,13 +106,20 @@ engine.refresh()
 engine.refresh_focus()
 with store.edit() as s:
     # a held name that left the list, so the rotation block is populated
-    s['positions']['005930'] = {'quantity': 3, 'average': 70000.0, 'cost_basis': 210000.0, 'strategy_mode': 'intraday', 'horizon': 'month',
-                                 'stop_price': 71900.0, 'initial_stop': 66500.0, 'trailing': True, 'trail_pct': 5.0, 'high_water': 75700.0,
-                                 'take_profit_price': 77000.0, 'expires_at': time.time()+12*86400, 'entry_thesis': '3개월 상승 추세 지속, 실적 발표 전 눌림목 매수'}
+    s['positions'].setdefault('005930', {'quantity': 3, 'average': 70000.0, 'cost_basis': 210000.0, 'strategy_mode': 'intraday',
+                                          'stop_price': 68000.0, 'take_profit_price': 74000.0, 'expires_at': time.time()+7200})
     focus = s['focus'].get('KR')
     if focus and '005930' not in [p['symbol'] for p in focus['picks']]:
         s['positions']['005930']['rotation'] = {'action': 'keep', 'pnl_pct': 1.2, 'trend_ok': True, 'at': time.time(), 'session_date': focus['session_date'],
                                                  'reason': '추세가 유지돼 강제로 팔지 않고 손절·익절·보유시간 규칙에 맡깁니다. 추가 매수는 하지 않습니다.'}
+with store.edit() as s:
+    for record in s['focus_history']:
+        record['result'] = {'pick_pct': .4, 'pool_pct': .1, 'fixed_pct': None, 'excess_pool_pct': .3, 'excess_fixed_pct': None,
+                            'n_picks': 3, 'n_pool': 12, 'range_pick_pct': 5.8, 'range_pool_pct': 3.1, 'range_excess_pct': 2.7}
+with store.edit() as s:
+    # a fractional US position, so the positions table and the sizing text can show one
+    s['positions']['AAPL'] = {'quantity': 0.2727, 'average': 733.4, 'cost_basis': 200.0, 'strategy_mode': 'intraday', 'horizon': 'intraday',
+                              'stop_price': 725.0, 'take_profit_price': 745.0, 'expires_at': time.time()+3600}
 engine.stop()
 store.release()
 print('seeded')
