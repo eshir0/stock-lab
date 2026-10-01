@@ -9,7 +9,8 @@ from zoneinfo import ZoneInfo
 
 from .agents import Agents, DESK_ROLES, market_context
 from .desk import DESK_CALLS
-from .evaluation import summarize, update_outcomes
+from . import entry
+from .evaluation import score_days, summarize, symbols_due, update_outcomes
 from .live.shadow import shadow_summary
 from .intel import FLOW_DAYS, FLOW_TTL, MarketIntel, RANK_KINDS, RANK_RETRY, RANK_TTL, parse_investor_trading, parse_rankings
 from .config import ROLES
@@ -17,7 +18,8 @@ from .instruments import INSTRUMENTS, SYMBOLS
 from .desk import DeskMixin
 from .focus import FocusMixin, universe_mode
 from . import universe
-from .risk import normalize_settings, RiskError
+from . import shares
+from .risk import min_take_pct, normalize_settings, RiskError, round_trip_cost_pct
 from .providers import DemoProvider, ProviderError, RateLimited, TossProvider
 from .performance import performance_summary, record_performance
 from .store import event
@@ -45,6 +47,9 @@ class Engine(DeskMixin, FocusMixin):
     def __init__(self, config, store, provider=None):
         self.c, self.store = config, store
         self.focus_attempts = {}   # market -> (time of the last build attempt, consecutive failures, session date)
+        self.daily_cache = {}      # symbol -> (read at, completed daily bars of the last ~3 months)
+        self.days_scored_at = 0
+        self.signal_gate = config.mode != 'demo'   # demo answers are scripted, so there is nothing to conserve
         self.active_provider = None
         self.provider = provider or (DemoProvider() if config.mode == 'demo' else TossProvider(config))
         self.agents = Agents(config, store)
@@ -55,12 +60,17 @@ class Engine(DeskMixin, FocusMixin):
     def boot(self):
         """Restore after a process start. A run the OWNER left running (`resume`, set by 시작 and cleared by 중지 or
         전량 매도) continues on its own, so a reboot or a crash does not silently leave the desk idle. Every in-flight
-        cycle and pending proposal is dropped either way; the ledger is untouched. Paper trading only."""
+        cycle and pending proposal is dropped either way; the ledger is untouched. Waiting price plans (entry.py) survive a
+        restart within `entry.RESTART_GRACE` of the last quote and are dropped after a longer outage. Paper trading only."""
         with self.store.edit() as s:
             resume = bool(s.get('resume')) and not s['liquidating']
+            now = time.time()
+            alive = max([q.get('received', 0) for q in (s.get('quotes') or {}).values()] or [0])
             s['running'] = resume
             s['generation'] += 1
-            s['next_run'] = time.time()
+            # A restart must not jump the queue: an analysis that was already scheduled for later (the pacing, a quota wait) keeps
+            # its time, one that was due while the server was down starts at once. Pressing 시작 still starts at once.
+            s['next_run'] = max(now, s.get('next_run') or 0) if resume else now
             s['scheduler_status'] = '거래 가능한 종목을 확인하고 있습니다.' if resume else '중지됨 · 시작 버튼으로 실행하세요.'
             for p in s['proposals']:
                 if p['status'] == 'pending':
@@ -68,6 +78,12 @@ class Engine(DeskMixin, FocusMixin):
             for run in s['runs']:
                 if run['status'] == 'running':
                     run['status'] = 'cancelled'
+            # A short restart (a deploy) keeps the AI's price plans; after a longer outage they may be stale, so they go.
+            kept = len(entry.waiting(s)) if resume and now-alive <= entry.RESTART_GRACE else 0
+            if not kept:
+                entry.close_waiting(s, 'cancelled', '서버가 다시 시작되어 취소했습니다.', now)
+            else:
+                event(s, f'재시작이 짧아 대기 중이던 조건 진입 계획 {kept}개는 그대로 유지합니다.')
             event(s, '서버가 다시 시작되어 실행 중이던 상태를 이어갑니다. 잔고·보유 종목은 그대로이고 진행 중이던 분석만 다시 합니다.'
                   if resume else '서버가 시작되었습니다. 잔고를 보존하고 중지 상태로 복구했습니다.')
 
@@ -82,6 +98,7 @@ class Engine(DeskMixin, FocusMixin):
             for run in s['runs']:
                 if run['status'] == 'running':
                     run['status'] = 'cancelled'
+            # waiting price plans stay: the next start decides whether they are still fresh enough (see boot)
 
     def current(self, gen):
         s = self.store.read()
@@ -111,7 +128,8 @@ class Engine(DeskMixin, FocusMixin):
             for run in s['runs']:
                 if run['status'] == 'running':
                     run['status'] = 'cancelled'
-            event(s, '중지했습니다. 대기 제안을 무효화하고 보유 종목은 유지합니다.')
+            entry.close_waiting(s, 'cancelled', '중지로 취소했습니다.', time.time())
+            event(s, '중지했습니다. 대기 제안과 조건 진입을 무효화하고 보유 종목은 유지합니다.')
 
     def set_execution(self, mode):
         if mode not in ('manual', 'auto'):
@@ -124,6 +142,7 @@ class Engine(DeskMixin, FocusMixin):
             for p in s['proposals']:
                 if p['status'] == 'pending':
                     p['status'] = 'invalidated'
+            entry.close_waiting(s, 'cancelled', '운용 방식 변경으로 취소했습니다.', time.time())
             label = '자동 모의체결' if mode == 'auto' else '사용자 승인'
             event(s, f'{label} 모드로 설정했습니다. 시작 버튼을 누르면 실행됩니다.')
 
@@ -131,8 +150,8 @@ class Engine(DeskMixin, FocusMixin):
         values = (krw, usd, max_order_pct)
         if any(type(v) not in (int, float) or not math.isfinite(v) for v in values):
             raise RuleError('원금과 매수 한도는 유효한 숫자여야 합니다.')
-        if not (0 <= krw <= 1e12 and 0 <= usd <= 1e9 and 1 <= max_order_pct <= 30):
-            raise RuleError('원금 범위와 매수 한도(1~30%)를 확인하세요.')
+        if not (0 <= krw <= 1e12 and 0 <= usd <= 1e9 and 1 <= max_order_pct <= 100):
+            raise RuleError('원금 범위와 매수 한도(1~100%)를 확인하세요.')
         krw, usd = money(krw), money(usd)
         if krw == 0 and usd == 0:
             raise RuleError('최소 한 통화의 가상 원금이 필요합니다.')
@@ -147,21 +166,54 @@ class Engine(DeskMixin, FocusMixin):
         except ValueError as exc:
             raise RuleError(str(exc)) from None
 
+    def fractional(self, currency):
+        """US instruments trade in fractional shares (a simulation assumption, FRACTIONAL_US); Korean ones in whole shares."""
+        return currency == 'USD' and self.c.fractional_us
+
+    @staticmethod
+    def position_ratio(state):
+        """The most of the account one name may take: a day-trading experiment sets its own (up to 100%), the rest keep 30%."""
+        if state.get('strategy_mode') != 'intraday':
+            return .30
+        return (state.get('strategy_settings') or {}).get('max_position_pct', 30)/100
+
     def order_constraints(self, s, symbol, q):
         currency = SYMBOLS[symbol]['currency']
         nav = equity(s, currency)
         price = money(q['ask']*(1+self.c.slippage_bps/10000))
         unit_cost = price*(1+(self.c.fee_kr if currency == 'KRW' else self.c.fee_us)/10000)
         held = s['positions'].get(symbol, {}).get('quantity', 0)
-        max_buy = max(0, min(int(s['cash'][currency]/unit_cost),
-                             int(nav*s.get('max_order_ratio', .10)/unit_cost),
-                             int(nav*.30/price)-held, int(q['ask_size']), 10000))
-        max_sell = min(held, int(q['bid_size'])) if s.get('strategy_mode') == 'intraday' else held
-        return {'max_order_equity_ratio': s.get('max_order_ratio', .10),
-                'max_position_equity_ratio': .30, 'portfolio_equity': nav,
+        order_ratio, name_ratio = s.get('max_order_ratio', .10), self.position_ratio(s)
+        fractional = self.fractional(currency)
+        if fractional:
+            # Money-based limits, rounded down to four decimals, with two cents of room for the cent rounding of fees.
+            def afford(amount):
+                return shares.floor_to(max(0.0, amount-.02)/unit_cost, True)
+            room = min(afford(s['cash'][currency]), afford(nav*order_ratio), afford(nav*name_ratio-held*price),
+                       shares.floor_to(q['ask_size'], True), Decimal(shares.MAX_QUANTITY))
+            max_buy = 0 if shares.below_minimum(room, price, True) else shares.number(room)
+            max_sell = min(held, q['bid_size']) if s.get('strategy_mode') == 'intraday' else held
+        else:
+            max_buy = max(0, min(int(s['cash'][currency]/unit_cost),
+                                 int(nav*order_ratio/unit_cost),
+                                 int(nav*name_ratio/price)-held, int(q['ask_size']), 10000))
+            max_sell = min(held, int(q['bid_size'])) if s.get('strategy_mode') == 'intraday' else held
+        return {'max_order_equity_ratio': order_ratio,
+                'max_position_equity_ratio': name_ratio, 'portfolio_equity': nav,
+                'round_trip_cost_pct': round(round_trip_cost_pct(self.c, currency, q), 3),
+                'min_take_profit_pct': round(min_take_pct(self.c, currency, q), 3),
                 'max_buy_quantity': max_buy, 'max_sell_quantity': max_sell,
-                'integer_shares_only': True, 'shorting': False, 'leverage': False,
+                'integer_shares_only': not fractional, 'fractional_shares': fractional,
+                'shorting': False, 'leverage': False,
                 'leveraged_etfs': s.get('strategy_settings', {}).get('include_leveraged_etfs', False)}
+
+    def position_cap(self, state, currency):
+        """The most one name may cost right now: the smaller of the per-order and per-name limits that `order_constraints`
+        applies, less trading costs and a 3% cushion for the price moving before the order."""
+        ratio = min(state.get('max_order_ratio', .10), self.position_ratio(state))
+        fee = self.c.fee_kr if currency == 'KRW' else self.c.fee_us
+        costs = (1+self.c.slippage_bps/10000)*(1+fee/10000)*1.03
+        return equity(state, currency)*ratio/costs
 
     def request_cycle(self, symbol):
         if symbol not in SYMBOLS:
@@ -202,6 +254,24 @@ class Engine(DeskMixin, FocusMixin):
             message = str(e) if isinstance(e, ProviderError) else '시세 갱신 실패. 최신 시세를 받을 때까지 거래를 차단합니다.'
             with self.store.edit() as s:
                 s['last_error'] = message
+
+    def score_days(self, now=None):
+        """Score month decisions against later daily closes. The bars are read first, outside the state lock; rare (each
+        15 minutes at most) and silent when nothing has waited long enough."""
+        now = time.time() if now is None else now
+        if now-self.days_scored_at < 900:
+            return
+        self.days_scored_at = now
+        needed = symbols_due(self.store.read().get('evaluations', []), now)
+        bars = {}
+        for symbol in sorted(needed):
+            try:
+                bars[symbol] = self.daily_bars(symbol, now)
+            except (ProviderError, KeyError, ValueError):
+                continue
+        if bars:
+            with self.store.edit() as s:
+                score_days(s, now, bars)
 
     def refresh_intel(self):
         """Official ranking and investor-flow reads on their own slow cadence.
@@ -288,16 +358,19 @@ class Engine(DeskMixin, FocusMixin):
     def fill(self, s, symbol, side, qty, q, ref, liquidation=False):
         self.validate_quote(q, symbol)
         s['quotes'][symbol] = q
-        if type(qty) is not int or qty < 1 or qty > 10000 or side not in ('BUY', 'SELL'):
-            raise RuleError('수량 또는 매매 방향이 올바르지 않습니다.')
         currency = SYMBOLS[symbol]['currency']
+        fractional = self.fractional(currency)
+        if side not in ('BUY', 'SELL') or not shares.is_valid(qty, fractional):
+            raise RuleError('수량 또는 매매 방향이 올바르지 않습니다.')
+        qty_d = shares.dec(qty)
+        qty = shares.number(qty_d)
         depth = q['ask_size'] if side == 'BUY' else q['bid_size']
         if depth < qty:
             raise RuleError('최우선 호가 잔량이 부족합니다. 이번 주문은 체결하지 않습니다.')
         slip = Decimal(str(self.c.slippage_bps))/10000
         price = money(Decimal(str(q['ask'] if side == 'BUY' else q['bid'])) *
                       (1+slip if side == 'BUY' else 1-slip))
-        gross = money(Decimal(str(price))*qty)
+        gross = money(Decimal(str(price))*qty_d)
         bps = self.c.fee_kr if currency == 'KRW' else self.c.fee_us
         if currency == 'KRW' and side == 'SELL':
             bps += self.c.sell_tax_kr
@@ -318,27 +391,33 @@ class Engine(DeskMixin, FocusMixin):
                     except (RuleError, KeyError):
                         raise RuleError('보유 종목의 최신 평가 시세가 부족해 신규 매수를 차단했습니다.') from None
             nav = equity(s, currency)
-            ratio = s.get('max_order_ratio', .10)
-            if not .01 <= ratio <= .30:
+            ratio, name_ratio = s.get('max_order_ratio', .10), self.position_ratio(s)
+            if not .01 <= ratio <= 1:
                 raise RuleError('실험의 매수 한도가 유효하지 않습니다.')
+            if shares.below_minimum(qty, price, fractional):
+                raise RuleError('소수점 주문은 최소 1달러 이상이어야 합니다.')
             if total > nav*ratio:
                 raise RuleError(f'한 번의 매수는 해당 통화 자산의 {ratio*100:g}%까지 허용됩니다.')
-            if (pos['quantity']+qty)*price > nav*.30:
-                raise RuleError('한 종목의 비중은 해당 통화 자산의 30%까지 허용됩니다.')
+            new_qty = shares.dec(pos['quantity'])+qty_d
+            if float(new_qty)*price > nav*name_ratio:
+                raise RuleError(f'한 종목의 비중은 해당 통화 자산의 {name_ratio*100:g}%까지 허용됩니다.')
             new_cost = money(Decimal(str(cost_basis))+Decimal(str(total)))
-            average = money(Decimal(str(new_cost))/(pos['quantity']+qty))
-            s['positions'][symbol] = {**pos, 'quantity': pos['quantity']+qty, 'average': average, 'cost_basis': new_cost}
+            average = money(Decimal(str(new_cost))/new_qty)
+            s['positions'][symbol] = {**pos, 'quantity': shares.number(new_qty), 'average': average, 'cost_basis': new_cost}
             s['cash'][currency] = money(Decimal(str(s['cash'][currency]))-Decimal(str(total)))
             realized = 0
         else:
-            if qty > pos['quantity']:
+            held_d = shares.dec(pos['quantity'])
+            if qty_d > held_d:
                 raise RuleError('보유 수량보다 많이 매도할 수 없습니다.')
+            if qty_d < held_d and shares.below_minimum(qty, price, fractional):
+                raise RuleError('소수점 주문은 최소 1달러 이상이어야 합니다. 남은 수량을 모두 매도하세요.')
             s['cash'][currency] = money(Decimal(str(s['cash'][currency]))+Decimal(str(gross))-Decimal(str(fee)))
-            allocated = cost_basis if qty == pos['quantity'] else money(Decimal(str(cost_basis))*qty/pos['quantity'])
+            allocated = cost_basis if qty_d == held_d else money(Decimal(str(cost_basis))*qty_d/held_d)
             realized = money(Decimal(str(gross))-Decimal(str(fee))-Decimal(str(allocated)))
-            remaining = pos['quantity']-qty
+            remaining = held_d-qty_d
             if remaining:
-                s['positions'][symbol]['quantity'] = remaining
+                s['positions'][symbol]['quantity'] = shares.number(remaining)
                 s['positions'][symbol]['cost_basis'] = money(Decimal(str(cost_basis))-Decimal(str(allocated)))
                 s['positions'][symbol]['average'] = money(Decimal(str(s['positions'][symbol]['cost_basis']))/remaining)
             else:
@@ -396,6 +475,8 @@ class Engine(DeskMixin, FocusMixin):
             self.fill(s, p['symbol'], p['side'], p['quantity'], q, p['id'])
             if sizing is not None:
                 self.apply_desk_plan(s, p['symbol'], p, sizing)
+            if p.get('watch_id'):
+                s['trades'][-1]['entry_watch'] = p['watch_id']
             p['status'] = 'filled'
             for other in s['proposals']:
                 if other['status'] == 'pending':
@@ -419,6 +500,7 @@ class Engine(DeskMixin, FocusMixin):
             for run in s['runs']:
                 if run['status'] == 'running':
                     run['status'] = 'cancelled'
+            entry.close_waiting(s, 'cancelled', '전량 매도 요청으로 취소했습니다.', time.time())
             s['liquidating'] = bool(s['positions'])
             event(s, '전량 모의매도를 요청했습니다. 거래 가능 시간과 호가를 확인하며 남은 수량을 처리합니다.')
 
@@ -433,7 +515,7 @@ class Engine(DeskMixin, FocusMixin):
                 with self.store.edit() as s:
                     if not s['liquidating'] or s['generation'] != gen:
                         return
-                    qty = min(s['positions'].get(symbol, {}).get('quantity', 0), int(q['bid_size']), 10000)
+                    qty = min(s['positions'].get(symbol, {}).get('quantity', 0), q['bid_size'], 10000)
                     if qty:
                         self.fill(s, symbol, 'SELL', qty, q, 'liquidation-'+str(gen), True)
             except (RuleError, ProviderError):
@@ -626,13 +708,16 @@ class Engine(DeskMixin, FocusMixin):
         s['focus_eval'] = universe.summarize(s.get('focus_history') or [])
         s['focus_history'] = [{k: v for k, v in r.items() if k != 'ref'} for r in (s.get('focus_history') or [])[-10:]]
         s['focus_config'] = {'mode': universe_mode(s) if s.get('strategy_mode') == 'intraday' else 'fixed',
-                             'per_market': self.c.focus_per_market, 'ai': self.c.focus_ai}
+                             'per_market': self.c.focus_per_market, 'ai': self.c.focus_ai,
+                             'profile': self.focus_profile(s) if s.get('strategy_mode') == 'intraday' else None}
         s['live'] = {'config': self.c.live.public(), 'shadow': shadow_summary(s),
                      'halt': (s.get('live') or {}).get('halt', {'active': False})}
         s.pop('shadow_orders', None)
         evaluations = s.get('evaluations', [])
         s['evaluation'] = summarize(evaluations)
         s['evaluations'] = [{k: v for k, v in e.items() if k != 'candidates'} for e in evaluations[-30:]]
+        watches = s.get('watches') or []
+        s['watches'] = [w for w in watches if w['status'] == 'waiting'] + [w for w in watches if w['status'] != 'waiting'][-8:]
         s['trades_count'] = len(s['trades'])
         s['trades'] = s['trades'][-100:]
         s['server_time'] = time.time()
@@ -641,7 +726,8 @@ class Engine(DeskMixin, FocusMixin):
                        'toss_configured': bool(self.c.toss_id and self.c.toss_secret),
                        'toss_rate': {group: dict(info) for group, info in (getattr(self.provider, 'rates', None) or {}).items()},
                        'model': self.c.model, 'providers': self.c.provider_order, 'daily_limit': self.c.ai_daily_calls,
-                       'poll': self.c.poll_seconds, 'interval': self.c.interval_seconds,
+                       'poll': self.c.poll_seconds, 'interval': self.interval_plan(s)[0], 'interval_active': self.interval_plan(s)[1],
+                       'conditional_entry': self.c.conditional_entry, 'min_take_cost_ratio': self.c.min_take_cost_ratio,
                        'fee_kr_bps': self.c.fee_kr, 'fee_us_bps': self.c.fee_us,
                        'sell_tax_kr_bps': self.c.sell_tax_kr, 'slippage_bps': self.c.slippage_bps,
                        'roles': [{'id': role, 'name': name} for role, name in (DESK_ROLES if s.get('strategy_mode') == 'intraday' else ROLES)],

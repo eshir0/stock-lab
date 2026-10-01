@@ -42,10 +42,30 @@ class Config:
     poll_seconds: int = max(5, int(os.getenv('QUOTE_POLL_SECONDS', '10')))
     # Parallel Toss order-book reads (each symbol needs its own call); clamped to 1-8.
     toss_parallel: int = max(1, min(8, int(os.getenv('TOSS_PARALLEL', '4'))))
-    interval_seconds: int = max(60, int(os.getenv('ANALYSIS_INTERVAL_SECONDS', '900')))
+    interval_seconds: int = max(60, int(os.getenv('ANALYSIS_INTERVAL_SECONDS', '1200')))
+    # Day trading looks more often than a month plan: every 10 minutes, and every 5 while a position is open or a proposal
+    # waits (a quick second look pays most then). Set both to the same value for a fixed interval.
+    daytrade_interval_seconds: int = max(60, int(os.getenv('DAYTRADE_INTERVAL_SECONDS', '600')))
+    daytrade_active_interval_seconds: int = max(60, int(os.getenv('DAYTRADE_ACTIVE_INTERVAL_SECONDS', '300')))
     # Daily focus list: names per market the intraday desk may buy, and whether the AI reads the news for it.
     focus_per_market: int = max(1, min(6, int(os.getenv('FOCUS_PER_MARKET', '3'))))
     focus_ai: bool = os.getenv('FOCUS_AI', 'on').strip().lower() not in ('off', 'false', '0', 'no')
+    # Fractional US shares (four decimals, at least about a dollar per order). A simulation assumption; Korean orders stay whole shares.
+    fractional_us: bool = os.getenv('FRACTIONAL_US', 'on').strip().lower() not in ('off', 'false', '0', 'no')
+    # Spread the AI window's budget over the session (see pacing.py): the interval above is the minimum, pacing only stretches it.
+    quota_pacing: bool = os.getenv('QUOTA_PACING', 'on').strip().lower() not in ('off', 'false', '0', 'no')
+    pace_max_seconds: int = max(60, int(os.getenv('PACE_MAX_SECONDS', '4500')))
+    # Conditional entries: the director may leave a price plan with a HOLD, which the server watches without any AI call and trades
+    # through the ordinary risk rules when it comes true (see entry.py). Off keeps the plans from being stored at all.
+    conditional_entry: bool = os.getenv('CONDITIONAL_ENTRY', 'on').strip().lower() not in ('off', 'false', '0', 'no')
+    # Research reuse: a second analysis of the same name within this many seconds reuses the first one's planner, company and news
+    # research and only reads the tape, the objections and the decision again (3 AI calls instead of 6). 0 turns it off. The research
+    # is looked up afresh when the price has moved this many percent since it was made (see reuse.py).
+    # A buy is refused when its take-profit is narrower than this many times the round-trip cost (fees, slippage, Korean sell tax and the
+  # quoted spread): a target that small is eaten by the costs. 0 turns the rule off (see risk.size_order).
+    min_take_cost_ratio: float = max(0.0, float(os.getenv('MIN_TAKE_COST_RATIO', '3')))
+    research_reuse_seconds: int = max(0, int(os.getenv('RESEARCH_REUSE_SECONDS', '3600')))
+    research_reuse_move_pct: float = max(.1, float(os.getenv('RESEARCH_REUSE_MOVE_PCT', '1.5')))
     proposal_seconds: int = 180
     quote_age: int = 30
     fee_kr: float = float(os.getenv('FEE_KR_BPS', '15'))
@@ -96,6 +116,8 @@ class Config:
             raise ValueError('APP_PASSWORD (8+) and SESSION_SECRET (32+) must be configured')
         if any(not math.isfinite(x) or x < 0 or x > 1000 for x in [self.fee_kr, self.fee_us, self.sell_tax_kr, self.slippage_bps]):
             raise ValueError('Simulation cost parameters must be between 0 and 1000 bps')
+        if not math.isfinite(self.min_take_cost_ratio) or not 0 <= self.min_take_cost_ratio <= 20:
+            raise ValueError('MIN_TAKE_COST_RATIO must be between 0 and 20')
 
 
 INSTRUMENTS = [

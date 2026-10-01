@@ -11,8 +11,11 @@ const names = {selector:'종목 선정',planner:'플래너',fundamental:'기업 
 const exitNames = {stop_loss:'손절 기준 도달',take_profit:'익절 기준 도달',time_stop:'보유 기한 도달',time_exit:'보유 기한 도달',max_holding:'보유 기한 도달',expiry:'보유 기한 도달',daily_loss_limit:'일중 손실 한도',director:'디렉터 매도 의견',liquidation:'전량 모의매도'};
 const safeUrl = value => { try { const url = new URL(value); return ['https:','http:'].includes(url.protocol) ? url.href : null; } catch { return null; } };
 const roleList = s => Array.isArray(s.config.roles) && s.config.roles.length ? s.config.roles : Object.entries(names).filter(([id]) => s.strategy_mode === 'intraday' || id !== 'planner').map(([id,name]) => ({id,name}));
+const minutes = sec => sec % 60 === 0 ? `${sec / 60}분` : `${sec}초`;
+const intervalText = s => s.config.interval_active && s.config.interval_active < s.config.interval ? `${minutes(s.config.interval)}(보유 중 ${minutes(s.config.interval_active)})` : minutes(s.config.interval);
+const holdText = v => finite(v) ? (v >= 1440 ? Math.round(v / 1440) + '일' : v + '분') : '—';
 const plainPercent = value => finite(value) ? value.toLocaleString('ko-KR',{maximumFractionDigits:2}) + '%' : '—';
-const quantity = value => finite(value) ? Math.floor(value).toLocaleString('ko-KR') + '주' : '—';
+const quantity = value => finite(value) ? (Number.isInteger(value) ? value.toLocaleString('ko-KR') : value.toLocaleString('ko-KR', {maximumFractionDigits: 4})) + '주' : '—';
 let state = null, loggedIn = false, reportKey = '', busy = false, timer = null, loading = false, executionDirty = false, experimentId = null, evalHorizon = '60';
 const ruleNames = {golden_cross:'골든크로스', momentum:'모멘텀', mean_reversion:'평균회귀', breakout:'돌파'};
 const roleIcons = {selector:'target', planner:'clipboard', fundamental:'building', technical:'chart', news:'news', critic:'scale', director:'star'};
@@ -163,46 +166,60 @@ $('execution-dialog').addEventListener('close', async () => {
 $('experiment-open').onclick = () => {
   $('experiment-error').textContent = '';
   $('experiment-input-name').value = '모의투자 ' + new Date().toLocaleDateString('ko-KR');
-  $('seed-krw').value = '1000000';
-  $('seed-usd').value = '1000';
-  $('max-order-pct').value = '30';
+  $('seed-krw').value = '10000000';
+  $('seed-usd').value = '10000';
   $('strategy-mode').value = 'intraday';
   $('include-leveraged-etfs').checked = true;
   $('universe-mode').value = 'daily_focus';
   $('risk-per-trade').value = '0.5';
   $('daily-loss-limit').value = '2';
-  $('max-holding-minutes').value = '120';
+  $('horizon').value = 'month';
+  updateHorizonForm(true);
   updateStrategyForm();
   $('experiment-dialog').showModal();
 };
+// The holding limit is typed in days for a month plan and in minutes for a same-session one; the server always gets minutes.
+const horizons = {
+  month: {label:'최대 보유 기간 · 일', min:1, max:30, value:30, unit:1440, orderPct:30, positionPct:30, text:'종목을 밤새 들고 가며 최대 30일 안에 가장 큰 이익을 노립니다. 최근 3개월 일봉과 규칙 신호를 함께 보고, 가격이 목표의 절반에 닿으면 손절가를 올려 이익을 지킵니다(추적 손절). 장 마감 전에 청산하지 않습니다. 오늘의 집중 종목은 상승 추세 종목 위주로 고릅니다.'},
+  intraday: {label:'최대 보유 시간 · 분', min:15, max:240, value:120, unit:1, orderPct:100, positionPct:100, text:'같은 장 안에서 사고팔고 마감 2분 전에 청산합니다. 분봉 중심의 단타이며, 오늘의 집중 종목도 하루 변동폭이 크고 거래가 활발한 종목 위주로 고릅니다(방향은 거르지 않음).'}
+};
+function updateHorizonForm(reset) {
+  const h = horizons[$('horizon').value] || horizons.month, input = $('max-holding');
+  $('max-holding-label').textContent = h.label;
+  input.min = h.min; input.max = h.max;
+  if (reset) { input.value = h.value; $('max-order-pct').value = h.orderPct; $('max-position-pct').value = h.positionPct; }
+  $('horizon-description').textContent = h.text;
+}
+$('horizon').onchange = () => updateHorizonForm(true);
 $('strategy-mode').onchange = updateStrategyForm;
 function updateStrategyForm() {
   const intraday = $('strategy-mode').value === 'intraday';
   $('intraday-settings').hidden = !intraday;
   $('intraday-settings').disabled = !intraday;
-  $('strategy-form-description').textContent = intraday ? '플래너 → 기업·차트·뉴스 병렬 조사 → 반대 검토 → 디렉터 순서로 분석하고, 목표 비중과 손절 위험을 바탕으로 수량을 정합니다.' : '기존 5역할 분석 방식입니다. 장중 전략의 손절·익절·보유 기한 관리를 추가하지 않습니다.';
+  $('strategy-form-description').textContent = intraday ? '플래너 → 기업·차트·뉴스 병렬 조사 → 반대 검토 → 디렉터 순서로 분석하고, 목표 비중과 손절 위험을 바탕으로 수량을 정합니다.' : '기존 5역할 분석 방식입니다. 손절·익절·보유 기한 관리를 추가하지 않습니다.';
 }
 $('experiment-cancel').onclick = () => $('experiment-dialog').close();
 $('experiment-form').addEventListener('submit', async e => {
   e.preventDefault();
   if (busy) return;
   const name = $('experiment-input-name').value.trim();
-  const seed_krw = Number($('seed-krw').value), seed_usd = Number($('seed-usd').value), max_order_pct = Number($('max-order-pct').value);
+  const seed_krw = Number($('seed-krw').value), seed_usd = Number($('seed-usd').value), max_order_pct = Number($('max-order-pct').value), max_position_pct = Number($('max-position-pct').value);
   const strategy_mode = $('strategy-mode').value;
-  const settings = {include_leveraged_etfs:$('include-leveraged-etfs').checked,risk_per_trade_pct:Number($('risk-per-trade').value),daily_loss_limit_pct:Number($('daily-loss-limit').value),max_holding_minutes:Number($('max-holding-minutes').value)};
-  if (!name || ![seed_krw,seed_usd,max_order_pct].every(Number.isFinite) || seed_krw < 0 || seed_usd < 0 || seed_krw + seed_usd <= 0 || max_order_pct < 1 || max_order_pct > 30) {
-    $('experiment-error').textContent = '실험 이름과 원금, 매수 한도를 확인해 주세요. 최소 한 통화의 원금은 0보다 커야 합니다.';
+  const horizon = $('horizon').value, span = horizons[horizon] || horizons.month, holdingInput = Number($('max-holding').value);
+  const settings = {include_leveraged_etfs:$('include-leveraged-etfs').checked,risk_per_trade_pct:Number($('risk-per-trade').value),daily_loss_limit_pct:Number($('daily-loss-limit').value),horizon,max_holding_minutes:holdingInput * span.unit};
+  if (!name || ![seed_krw,seed_usd,max_order_pct].every(Number.isFinite) || seed_krw < 0 || seed_usd < 0 || seed_krw + seed_usd <= 0 || max_order_pct < 1 || max_order_pct > 100 || !Number.isFinite(max_position_pct) || max_position_pct < 10 || max_position_pct > 100) {
+    $('experiment-error').textContent = '실험 이름과 원금을 확인해 주세요. 최소 한 통화의 원금은 0보다 커야 하고, 1회 매수 한도는 1~100%, 종목당 최대 비중은 10~100%입니다.';
     return;
   }
-  if (strategy_mode === 'intraday' && (!Object.values(settings).every(v => typeof v === 'boolean' || finite(v)) || settings.risk_per_trade_pct < .1 || settings.risk_per_trade_pct > 2 || settings.daily_loss_limit_pct < 1 || settings.daily_loss_limit_pct > 10 || settings.max_holding_minutes < 15 || settings.max_holding_minutes > 240 || !Number.isInteger(settings.max_holding_minutes))) {
-    $('experiment-error').textContent = '손절 위험은 0.1~2%, 일중 손실 한도는 1~10%, 보유 시간은 15~240분 범위로 입력해 주세요.';
+  if (strategy_mode === 'intraday' && (![settings.risk_per_trade_pct, settings.daily_loss_limit_pct, holdingInput].every(finite) || settings.risk_per_trade_pct < .1 || settings.risk_per_trade_pct > 2 || settings.daily_loss_limit_pct < 1 || settings.daily_loss_limit_pct > 10 || holdingInput < span.min || holdingInput > span.max || !Number.isInteger(holdingInput))) {
+    $('experiment-error').textContent = `손절 위험은 0.1~2%, 일중 손실 한도는 1~10%, 보유 ${horizon === 'month' ? '기간은 1~30일' : '시간은 15~240분'} 범위로 입력해 주세요.`;
     return;
   }
   busy = true;
   $('experiment-create').disabled = true;
   $('experiment-error').textContent = '';
   try {
-    await api('experiments',{name,seed_krw,seed_usd,max_order_pct,strategy_mode,...settings,universe_mode:$('universe-mode').value,confirmation:'새 실험 시작'});
+    await api('experiments',{name,seed_krw,seed_usd,max_order_pct,max_position_pct,strategy_mode,...settings,universe_mode:$('universe-mode').value,confirmation:'새 실험 시작'});
     executionDirty = false;
     $('experiment-dialog').close();
     toast('이전 실험을 보관하고 새 실험을 만들었습니다. 운용 방식을 선택한 뒤 시작하세요.');
@@ -259,9 +276,9 @@ function renderPerformance(s, c, id) {
   $('valuation-' + id).className = 'valuation small ' + (p.valuation_fresh === false ? 'stale' : 'muted');
 }
 function renderStrategy(s) {
-  const intraday = s.strategy_mode === 'intraday', settings = s.strategy_settings || {}, risk = s.risk_status;
-  $('strategy-label').textContent = intraday ? '전문가팀 · 장중 매매' : '기본 분석 · 기존 방식';
-  $('strategy-description').textContent = intraday ? `손절 위험 ${plainPercent(settings.risk_per_trade_pct)} · 일중 손실 한도 ${plainPercent(settings.daily_loss_limit_pct)} · 최대 보유 ${finite(settings.max_holding_minutes) ? settings.max_holding_minutes + '분' : '—'} · ${settings.include_leveraged_etfs ? '레버리지·인버스 ETF 포함' : '레버리지 ETF 제외'} · ${settings.universe_mode === 'fixed' ? '고정 종목' : '일일 집중 종목'}` : '현재 실험의 기존 분석 방식을 유지합니다. 전문가팀 장중 전략은 새 실험에서 선택할 수 있습니다.';
+  const intraday = s.strategy_mode === 'intraday', settings = s.strategy_settings || {}, risk = s.risk_status, month = intraday && settings.horizon === 'month';
+  $('strategy-label').textContent = intraday ? (month ? '전문가팀 · 1개월 스윙' : '전문가팀 · 당일 단타') : '기본 분석 · 기존 방식';
+  $('strategy-description').textContent = intraday ? `손절 위험 ${plainPercent(settings.risk_per_trade_pct)} · 일중 손실 한도 ${plainPercent(settings.daily_loss_limit_pct)} · 최대 보유 ${holdText(settings.max_holding_minutes)} · 종목당 최대 ${plainPercent(settings.max_position_pct ?? 30)} · ${settings.include_leveraged_etfs ? '레버리지·인버스 ETF 포함' : '레버리지 ETF 제외'} · ${settings.universe_mode === 'fixed' ? '고정 종목' : '일일 집중 종목'}${month ? ' · 규칙 신호가 있을 때만 AI 분석' : ''}` : '현재 실험의 기존 분석 방식을 유지합니다. 전문가팀 전략은 새 실험에서 선택할 수 있습니다.';
   $('risk-status').hidden = !intraday || !risk;
   if (intraday && risk) {
     const currencies = Array.isArray(risk.halted_currencies) ? risk.halted_currencies : [];
@@ -272,7 +289,8 @@ function renderStrategy(s) {
   $('monitor-warning').hidden = !intraday;
   if (intraday) {
     $('monitor-warning').className = 'monitor-warning small ' + (s.running ? '' : 'stale');
-    $('monitor-warning').textContent = s.running ? (s.execution_mode === 'auto' ? '손절·익절·보유 기한을 감시하며 조건 충족 시 자동 모의매도를 시도합니다.' : '손절·익절·보유 기한을 감시하며 조건 충족 시 매도 제안을 만듭니다. 직접 승인해야 체결됩니다.') + ' AI 호출 한도에 도달해도 실행 중인 청산 감시는 계속됩니다.' : '현재 손절·익절·보유 기한 감시가 멈춰 있습니다. 중지는 보유 종목을 유지하며, 시작해야 감시가 재개됩니다.';
+    const watched = month ? '손절·익절·추적 손절·보유 기한' : '손절·익절·보유 기한';
+    $('monitor-warning').textContent = s.running ? (s.execution_mode === 'auto' ? `${watched}을 감시하며 조건 충족 시 자동 모의매도를 시도합니다.` : `${watched}을 감시하며 조건 충족 시 매도 제안을 만듭니다. 직접 승인해야 체결됩니다.`) + ' AI 호출 한도에 도달해도 실행 중인 청산 감시는 계속됩니다.' : `현재 ${watched} 감시가 멈춰 있습니다. 중지는 보유 종목을 유지하며, 시작해야 감시가 재개됩니다.`;
   }
 }
 function render() {
@@ -285,7 +303,7 @@ function render() {
   $('liquidate').disabled = !Object.keys(s.positions).length || s.liquidating;
   $('analyze').disabled = !s.running || s.runs.some(r => r.status === 'running');
   $('mode-description').textContent = sim ? '시험 모드 · 합성 시세와 고정 응답으로 동작 확인' : `토스증권 시세 · ${(s.config.providers || ['gemini']).map(x => ({claude:'Claude',codex:'Codex',gemini:'Gemini'})[x] || x).join(' → ')} 분석 · 가상 자금`;
-  $('mode-banner').textContent = sim ? '시험 모드입니다. 아래 가격과 수익률은 실제 시장 성과가 아니며, 에이전트도 고정 응답입니다. 실제 시세 연결에는 MARKET_MODE=toss를 사용하세요.' : `실제 시세를 ${s.config.poll}초마다 조회하고 AI는 ${Math.round(s.config.interval/60)}분 간격으로 분석합니다. 정규장·최신 호가에서만 가상 체결하며 실제 주문은 전송하지 않습니다.`;
+  $('mode-banner').textContent = sim ? '시험 모드입니다. 아래 가격과 수익률은 실제 시장 성과가 아니며, 에이전트도 고정 응답입니다. 실제 시세 연결에는 MARKET_MODE=toss를 사용하세요.' : `실제 시세를 ${s.config.poll}초마다 조회하고 AI는 ${intervalText(s)} 간격으로 분석합니다. 정규장·최신 호가에서만 가상 체결하며 실제 주문은 전송하지 않습니다.`;
   $('error-banner').hidden = !s.last_error;
   $('error-banner').textContent = s.last_error;
   if (experimentId !== s.experiment_id) {
@@ -319,7 +337,7 @@ function render() {
     $('ai-cycle-budget').textContent = sim ? `${calls}개 역할의 고정 응답으로 흐름을 확인합니다.` : `분석 1회 ${calls}호출 · 일 ${dailyLimit}호출로 완전 분석 최대 ${Math.floor(dailyLimit/calls)}회 · 남은 호출로 최대 ${Math.floor(Math.max(0,dailyLimit-used)/calls)}회`;
   }
   $('trade-count').textContent = `${s.trades_count}건 모의체결`;
-  $('next-run').textContent = s.running ? `분석 간격 ${Math.round(s.config.interval/60)}분` : '현재 중지 상태';
+  $('next-run').textContent = s.running ? `분석 간격 ${intervalText(s)}` + (s.pacing?.paced ? ` · 사용량에 맞춰 지금은 ${minutes(Math.round(s.pacing.interval / 60) * 60)}` : '') : '현재 중지 상태';
   $('poll-label').textContent = `${s.config.poll}초 조회`;
   setHtml('watchlist', s.instruments.map(i => {
     const q = s.quotes[i.symbol], stale = !q || !finite(q.asof) || now - q.asof > 30 || q.asof - now > 5;
@@ -336,20 +354,42 @@ function render() {
   renderEvaluation(s);
   renderLive(s);
   renderIntel(s);
+  renderGate(s);
   renderFocus(s);
   setHtml('positions', Object.entries(s.positions).map(([symbol,p]) => {
     const i = s.instruments.find(i => i.symbol === symbol), q = s.quotes[symbol], pnl = q ? q.last * p.quantity - (p.cost_basis ?? p.average * p.quantity) : null;
     const currency = i?.currency || p.currency;
     const thesis = p.entry_thesis ? `<div class="entry-thesis" title="${esc(p.entry_thesis)}">${esc(p.entry_thesis)}</div>` : '';
-    return `<tr><td>${esc(i?.name || symbol)}${thesis}</td><td>${p.quantity}주</td><td>${number(p.average,currency)}</td><td class="${pnl === null ? 'muted' : pnl >= 0 ? 'gain' : 'loss'}">${pnl === null ? '시세 대기' : number(pnl,currency)}</td><td>${number(p.stop_price,currency)}</td><td>${number(p.take_profit_price,currency)}</td><td>${p.expires_at ? dateTime(p.expires_at) + (!s.running ? '<span class="monitor-off">감시 중지</span>' : p.expires_at <= now ? '<span class="monitor-off">기한 도달 · 청산 대기</span>' : '') : '—'}</td></tr>`;
+    return `<tr><td>${esc(i?.name || symbol)}${thesis}</td><td>${p.quantity}주</td><td>${number(p.average,currency)}</td><td class="${pnl === null ? 'muted' : pnl >= 0 ? 'gain' : 'loss'}">${pnl === null ? '시세 대기' : number(pnl,currency)}</td><td>${number(p.stop_price,currency)}${p.trailing ? '<span class="trail-tag">추적 중</span>' : ''}</td><td>${number(p.take_profit_price,currency)}</td><td>${p.expires_at ? dateTime(p.expires_at) + (!s.running ? '<span class="monitor-off">감시 중지</span>' : p.expires_at <= now ? '<span class="monitor-off">기한 도달 · 청산 대기</span>' : '') : '—'}</td></tr>`;
   }).join('') || '<tr><td colspan="7" class="empty-cell">아직 보유한 종목이 없습니다.</td></tr>');
   setHtml('events', s.events.slice(-15).reverse().map(e => `<div class="event ${e.level === 'warning' ? 'warning' : ''}"><time>${clock(e.time)}</time><p>${esc(e.message)}</p></div>`).join(''));
-  setHtml('trades', s.trades.slice().reverse().map(t => `<tr><td>${dateTime(t.time)}</td><td>${esc(s.instruments.find(i => i.symbol === t.symbol)?.name || t.symbol)}</td><td>${t.side === 'BUY' ? '매수' : '매도'}</td><td>${t.liquidation || t.execution_mode === 'liquidation' ? '전량매도' : t.execution_mode === 'auto' ? '자동' : '직접 승인'}</td><td>${t.quantity}주</td><td>${number(t.price,t.currency)}</td><td>${number(t.fee,t.currency)}</td><td class="${t.realized >= 0 ? 'gain' : 'loss'}">${t.side === 'SELL' ? number(t.realized,t.currency) : '—'}</td><td>${esc(t.exit_reason ? exitNames[t.exit_reason] || t.exit_reason : '—')}</td></tr>`).join('') || '<tr><td colspan="9" class="empty-cell">모의매매가 체결되면 이곳에 기록됩니다.</td></tr>');
-  $('cost-note').textContent = `시뮬레이션 비용 가정: 매매비용 국내 ${s.config.fee_kr_bps}bp / 미국 ${s.config.fee_us_bps}bp, 국내 매도세금 ${s.config.sell_tax_kr_bps}bp, 슬리피지 ${s.config.slippage_bps}bp. 실제 수수료·세금과 다를 수 있습니다. 1bp = 0.01%. 자동 환전은 하지 않습니다.`;
+  setHtml('trades', s.trades.slice().reverse().map(t => `<tr><td>${dateTime(t.time)}</td><td>${esc(s.instruments.find(i => i.symbol === t.symbol)?.name || t.symbol)}</td><td>${t.side === 'BUY' ? '매수' : '매도'}</td><td>${t.liquidation || t.execution_mode === 'liquidation' ? '전량매도' : t.entry_watch ? (t.execution_mode === 'auto' ? '조건 진입' : '조건 진입 · 승인') : t.execution_mode === 'auto' ? '자동' : '직접 승인'}</td><td>${t.quantity}주</td><td>${number(t.price,t.currency)}</td><td>${number(t.fee,t.currency)}</td><td class="${t.realized >= 0 ? 'gain' : 'loss'}">${t.side === 'SELL' ? number(t.realized,t.currency) : '—'}</td><td>${esc(t.exit_reason ? exitNames[t.exit_reason] || t.exit_reason : '—')}</td></tr>`).join('') || '<tr><td colspan="9" class="empty-cell">모의매매가 체결되면 이곳에 기록됩니다.</td></tr>');
+  $('cost-note').textContent = `시뮬레이션 비용 가정: 매매비용 국내 ${s.config.fee_kr_bps}bp / 미국 ${s.config.fee_us_bps}bp, 국내 매도세금 ${s.config.sell_tax_kr_bps}bp, 슬리피지 ${s.config.slippage_bps}bp. 실제 수수료·세금과 다를 수 있습니다. 1bp = 0.01%. 자동 환전은 하지 않습니다.` + (s.config.min_take_cost_ratio > 0 ? ` 익절 폭이 왕복 비용(수수료·슬리피지·세금·스프레드)의 ${s.config.min_take_cost_ratio}배 미만인 매수는 서버가 거부합니다.` : '');
   drawChart();
   drawSpark('spark-kr', 'KRW');
   drawSpark('spark-us', 'USD');
   updateNav();
+}
+const watchKinds = {breakout: '돌파 매수', pullback: '눌림 매수'};
+const watchEnds = {filled: '체결', proposed: '승인 대기', expired: '기한 만료', invalid: '무효 가격 이탈', replaced: '새 분석으로 교체', blocked: '위험 규칙 보류', cancelled: '취소'};
+function watchCard(w, s, now) {
+  const i = s.instruments.find(x => x.symbol === w.symbol), currency = i?.currency || w.currency, q = s.quotes[w.symbol];
+  const price = q && finite(q.ask) ? q.ask : w.last_price, stale = !q || !finite(q.asof) || now - q.asof > 30;
+  const gap = finite(price) && price > 0 ? (w.level / price - 1) * 100 : null, left = Math.max(0, Math.round((w.expires - now) / 60));
+  return `<article class="watch-card"><div class="watch-head"><h4>${esc(w.name)}</h4><span class="watch-kind ${esc(w.type)}">${esc(watchKinds[w.type] || w.type)}</span></div>`
+    + `<dl><div><dt>진입 조건</dt><dd>${number(w.level, currency)} ${w.type === 'breakout' ? '이상' : '이하'}</dd></div>`
+    + `<div><dt>현재 호가</dt><dd>${finite(price) ? number(price, currency) : '—'}${stale ? '<small class="muted"> · 시세 대기</small>' : ''}</dd></div>`
+    + `<div><dt>조건까지</dt><dd>${gap === null ? '—' : percent(gap)}</dd></div>`
+    + `<div><dt>무효 가격</dt><dd>${number(w.invalidate, currency)} 이하</dd></div><div><dt>남은 시간</dt><dd>${left}분</dd></div>`
+    + `<div><dt>조건 확인</dt><dd>${w.hits ? w.hits + '회 연속' : '대기'}</dd></div></dl>`
+    + (w.note ? `<p class="watch-note">${esc(w.note)}</p>` : '') + (w.summary ? `<p class="watch-why" title="${esc(w.summary)}">${esc(w.summary)}</p>` : '') + '</article>';
+}
+function watchPanel(s, now) {
+  const all = Array.isArray(s.watches) ? s.watches : [], waiting = all.filter(w => w.status === 'waiting'), done = all.filter(w => w.status !== 'waiting').slice(-3).reverse();
+  if (!waiting.length && !done.length) return '';
+  return `<div class="watch-list"><h3>조건 진입 대기 <span class="pill">${waiting.length}</span></h3><p class="small muted">AI가 관망하면서 남긴 가격 조건입니다. 서버가 AI 호출 없이 호가만 확인하다가 조건이 맞으면 같은 위험 규칙을 거쳐 체결합니다.</p>`
+    + waiting.map(w => watchCard(w, s, now)).join('')
+    + (done.length ? '<div class="watch-done">' + done.map(w => `<div><span>${esc(w.name)} · ${esc(watchKinds[w.type] || w.type)}</span><span>${esc(watchEnds[w.status] || w.status)}<small>${clock(w.closed)}${w.status === 'filled' && w.outcome ? ' · ' + esc(w.outcome) : ''}</small></span></div>`).join('') + '</div>' : '') + '</div>';
 }
 function renderDecisions(s,now,auto) {
   const pending = s.proposals.filter(p => p.status === 'pending' && p.expires > now);
@@ -357,16 +397,16 @@ function renderDecisions(s,now,auto) {
   $('pending-count').textContent = auto ? 'AUTO' : pending.length;
   if (auto) {
     const recent = s.trades.filter(t => t.execution_mode === 'auto').slice(-4).reverse();
-    setHtml('proposal-list', `<div class="auto-note"><span class="pill">자동 모의매매</span><h3>${s.running ? '조건을 통과한 제안을 자동 체결합니다' : '시작을 기다리고 있습니다'}</h3><p>개별 승인 없이 가상 계좌에서만 매매합니다. 관망 의견이거나 정규장·시세·호가·자금 한도를 충족하지 못하면 거래하지 않습니다.</p>${s.strategy_mode === 'intraday' ? '<p>목표 비중·손절 위험·현금·매수 한도를 함께 반영해 종목마다 수량을 정합니다. 손절·익절·보유 기한 감시는 실행 중에만 작동합니다.</p>' : ''}<p class="muted small">1주 가격이 매수 한도를 넘는 종목도 건너뜁니다. 분석·체결이 없을 때는 운영 기록을 확인하세요.</p></div>` + (recent.length ? '<div class="auto-trades">' + recent.map(t => `<div><span>${esc(s.instruments.find(i => i.symbol === t.symbol)?.name || t.symbol)} <b>${t.side === 'BUY' ? '매수' : '매도'} ${t.quantity}주</b>${t.exit_reason ? '<small>' + esc(exitNames[t.exit_reason] || t.exit_reason) + '</small>' : ''}</span><span class="muted small">${clock(t.time)}</span></div>`).join('') + '</div>' : empty('자동 체결 기록이 없습니다','시장 상황과 분석 결과에 따라 매매 없이 대기할 수 있습니다.')));
+    setHtml('proposal-list', watchPanel(s, now) + `<div class="auto-note"><span class="pill">자동 모의매매</span><h3>${s.running ? '조건을 통과한 제안을 자동 체결합니다' : '시작을 기다리고 있습니다'}</h3><p>개별 승인 없이 가상 계좌에서만 매매합니다. 관망 의견이거나 정규장·시세·호가·자금 한도를 충족하지 못하면 거래하지 않습니다.</p>${s.strategy_mode === 'intraday' ? '<p>목표 비중·손절 위험·현금·매수 한도를 함께 반영해 종목마다 수량을 정합니다. 손절·익절·보유 기한 감시는 실행 중에만 작동합니다. ' + (s.config.conditional_entry ? '관망이어도 AI가 가격 조건을 남기면 서버가 그 가격만 지켜보다가 조건이 맞을 때 체결합니다(조건 진입).' : '조건 진입은 꺼져 있습니다.') + '</p>' : ''}<p class="muted small">1주 가격이 매수 한도를 넘는 종목도 건너뜁니다. 분석·체결이 없을 때는 운영 기록을 확인하세요.</p></div>` + (recent.length ? '<div class="auto-trades">' + recent.map(t => `<div><span>${esc(s.instruments.find(i => i.symbol === t.symbol)?.name || t.symbol)} <b>${t.side === 'BUY' ? '매수' : '매도'} ${t.quantity}주</b>${t.exit_reason ? '<small>' + esc(exitNames[t.exit_reason] || t.exit_reason) + '</small>' : t.entry_watch ? '<small>조건 진입</small>' : ''}</span><span class="muted small">${clock(t.time)}</span></div>`).join('') + '</div>' : empty('자동 체결 기록이 없습니다','시장 상황과 분석 결과에 따라 매매 없이 대기할 수 있습니다.')));
     return;
   }
-  setHtml('proposal-list', pending.length ? pending.map(p => {
+  setHtml('proposal-list', watchPanel(s, now) + (pending.length ? pending.map(p => {
     const i = s.instruments.find(i => i.symbol === p.symbol), remaining = Math.max(0,Math.floor(p.expires-now));
-    return `<article class="proposal"><div class="proposal-head"><h3>${esc(i?.name || p.symbol)}</h3><span class="side ${p.side === 'SELL' ? 'sell' : ''}">${p.side === 'BUY' ? '매수 제안' : '매도 제안'}</span></div><div class="proposal-values"><div><small>수량</small><strong>${p.quantity}주</strong></div><div><small>기준 호가</small><strong>${number(p.reference_price,i?.currency)}</strong></div><div><small>예상 금액 · 비용 제외</small><strong>${number(p.reference_price*p.quantity,i?.currency)}</strong></div></div>${tradePlan(p)}${p.exit_reason ? '<div class="exit-trigger">청산 사유 · ' + esc(exitNames[p.exit_reason] || p.exit_reason) + '</div>' : ''}<p>${esc(p.summary)}</p>${p.sizing ? sizingDetails(p.sizing,i?.currency) : ''}<div class="risks">${(p.risks || []).map(esc).join(' · ')}</div><div class="proposal-actions"><button class="secondary" data-id="${esc(p.id)}" data-action="reject">거절</button><button class="primary" data-id="${esc(p.id)}" data-action="approve">승인하고 모의체결</button></div><p class="expires">${remaining}초 후 만료 · 가격 0.5% 이상 변동 시 재분석</p></article>`;
-  }).join('') : empty('결정할 제안이 없습니다',s.running ? '분석이 끝나면 매매안과 반대 의견을 확인할 수 있습니다.' : '시작을 누르면 투자팀이 관심종목을 순서대로 분석합니다.'));
+    return `<article class="proposal"><div class="proposal-head"><h3>${esc(i?.name || p.symbol)}</h3><span class="side ${p.side === 'SELL' ? 'sell' : ''}">${p.origin === 'watch' ? '조건 진입 · ' : ''}${p.side === 'BUY' ? '매수 제안' : '매도 제안'}</span></div><div class="proposal-values"><div><small>수량</small><strong>${p.quantity}주</strong></div><div><small>기준 호가</small><strong>${number(p.reference_price,i?.currency)}</strong></div><div><small>예상 금액 · 비용 제외</small><strong>${number(p.reference_price*p.quantity,i?.currency)}</strong></div></div>${tradePlan(p)}${p.exit_reason ? '<div class="exit-trigger">청산 사유 · ' + esc(exitNames[p.exit_reason] || p.exit_reason) + '</div>' : ''}<p>${esc(p.summary)}</p>${p.sizing ? sizingDetails(p.sizing,i?.currency) : ''}<div class="risks">${(p.risks || []).map(esc).join(' · ')}</div><div class="proposal-actions"><button class="secondary" data-id="${esc(p.id)}" data-action="reject">거절</button><button class="primary" data-id="${esc(p.id)}" data-action="approve">승인하고 모의체결</button></div><p class="expires">${remaining}초 후 만료 · 가격 0.5% 이상 변동 시 재분석</p></article>`;
+  }).join('') : empty('결정할 제안이 없습니다',s.running ? '분석이 끝나면 매매안과 반대 의견을 확인할 수 있습니다.' : '시작을 누르면 투자팀이 관심종목을 순서대로 분석합니다.')));
 }
 function tradePlan(report) {
-  const values = [['목표 비중',report.target_weight_pct,plainPercent],['손절 간격',report.stop_loss_pct,plainPercent],['익절 간격',report.take_profit_pct,plainPercent],['보유 상한',report.max_holding_minutes,v => v + '분']].filter(([,value]) => finite(value) && value > 0);
+  const values = [['목표 비중',report.target_weight_pct,plainPercent],['손절 간격',report.stop_loss_pct,plainPercent],['익절 간격',report.take_profit_pct,plainPercent],['보유 상한',report.max_holding_minutes,holdText]].filter(([,value]) => finite(value) && value > 0);
   if (!values.length) return '';
   return '<dl class="trade-plan">' + values.map(([label,value,format]) => `<div><dt>${label}</dt><dd>${esc(format(value))}</dd></div>`).join('') + '</dl>';
 }
@@ -393,6 +433,10 @@ function reportExtras(report) {
       return `<article><p>${esc(item.claim)}</p><div class="evidence-meta"><span>보고서 표기 게시일 · ${esc(published)}</span>${item.retrieved_at ? '<span>자료 조회 · ' + dateTime(item.retrieved_at) + '</span>' : ''}${linked ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">조회 출처 ↗</a>` : '<span>조회된 출처 연결 없음</span>'}</div></article>`;
     }).join('') + '</div>';
   }
+  if (report.role === 'director' && watchKinds[report.entry_type] && finite(report.entry_level)) {
+    const fmt = v => finite(v) ? v.toLocaleString('ko-KR', {maximumFractionDigits: 2}) : '—';
+    html += `<div class="briefing"><h4>조건 진입 계획</h4><p class="small">${esc(watchKinds[report.entry_type])} · 기준 가격 ${fmt(report.entry_level)} ${report.entry_type === 'breakout' ? '이상' : '이하'} · 무효 가격 ${fmt(report.entry_invalidate)} 이하 · ${finite(report.entry_minutes) ? report.entry_minutes + '분' : '—'} 유효</p><p class="small muted">서버가 AI 호출 없이 가격만 확인합니다. 조건이 맞아도 위험 규칙을 다시 통과해야 체결됩니다.</p></div>`;
+  }
   return html + tradePlan(report);
 }
 function searchEntryFrame(run, report) {
@@ -411,8 +455,16 @@ function renderIntel(s) {
   parts.push(`국내 수급 ${it.flows.count}/${it.flows.tried}종목`);
   $('intel-status').textContent = '토스 공식 시장 정보 · ' + parts.join(' · ');
 }
+const gateReasons = {signal:'규칙 신호', requested:'직접 요청', no_signal:'신호 없음', recent:'최근 분석함', no_data:'일봉 부족'};
+function renderGate(s) {
+  const g = s.desk_gate || {}, month = s.strategy_mode === 'intraday' && s.strategy_settings?.horizon === 'month', show = month && !!g.time;
+  $('gate-status').hidden = !show;
+  if (!show) return;
+  const list = (g.checked || []).map(c => `${c.name} ${gateReasons[c.reason] || c.reason}${c.rules?.length && c.reason !== 'no_signal' ? '(' + c.rules.map(r => ruleNames[r] || r).join('·') + ')' : ''}`).join(' · ');
+  $('gate-status').textContent = `규칙 신호 확인 ${clock(g.time)} · ${list || '확인한 종목 없음'} · AI 호출을 건너뛴 사이클 ${g.skipped_cycles || 0}회`;
+}
 const kindLabels = {stock: '', etf: 'ETF', lev: '레버리지·인버스'};
-function focusPick(p, held) {
+function focusPick(p, held, profile) {
   const ai = p.ai, kind = kindLabels[p.kind] || '';
   const lev = finite(p.leverage_factor) && Math.abs(p.leverage_factor) > 1 ? ` ${p.leverage_factor > 0 ? '+' : ''}${p.leverage_factor}배` : '';
   const risk = ai ? (ai.priced_in_risk === 'low' ? ['risk-low', '낮음'] : ['risk-medium', '보통']) : null;
@@ -420,7 +472,9 @@ function focusPick(p, held) {
   const score = finite(p.score) ? Math.max(0, Math.min(100, Math.round(p.score))) : 0;
   return `<li class="focus-pick"><div class="focus-head"><div><span class="name">${esc(p.name)}</span><span class="ticker">${esc(p.symbol)}</span>${kind ? `<span class="etf-tag">${esc(kind + lev)}</span>` : ''}</div><div class="focus-score"><b>${score}</b><span class="small muted">점</span></div></div>`
     + `<div class="focus-bar" aria-hidden="true"><span class="focus-bar-fill" data-w="${score}"></span></div>`
-    + `<p class="focus-metrics small">최근 1개월 <b class="${p.ret_1m_pct >= 0 ? 'gain' : 'loss'}">${percent(p.ret_1m_pct)}</b> · 5일 <b>${percent(p.ret_5d_pct)}</b> · 20일선 대비 <b>${percent(p.ext_20d_pct)}</b> · 하루 변동폭 ${finite(p.atr_pct) ? p.atr_pct.toFixed(1) + '%' : '—'}${esc(rank)}</p>`
+    + (profile === 'volatility'
+      ? `<p class="focus-metrics small">하루 평균 변동폭 <b>${finite(p.range_pct) ? p.range_pct.toFixed(1) + '%' : '—'}</b> · 평균 등락 <b>${finite(p.avg_move_pct) ? p.avg_move_pct.toFixed(1) + '%' : '—'}</b> · 어제 거래량 <b>${finite(p.volume_ratio) ? p.volume_ratio.toFixed(1) + '배' : '—'}</b> · 5일 <b>${percent(p.ret_5d_pct)}</b>${esc(rank)}</p>`
+      : `<p class="focus-metrics small">최근 1개월 <b class="${p.ret_1m_pct >= 0 ? 'gain' : 'loss'}">${percent(p.ret_1m_pct)}</b> · 5일 <b>${percent(p.ret_5d_pct)}</b> · 20일선 대비 <b>${percent(p.ext_20d_pct)}</b> · 하루 변동폭 ${finite(p.atr_pct) ? p.atr_pct.toFixed(1) + '%' : '—'}${esc(rank)}</p>`)
     + `<div class="focus-chips">${p.source === 'ai' ? '<span class="focus-chip ai">AI 선정</span>' : '<span class="focus-chip">데이터 선정</span>'}${held ? '<span class="focus-chip keep">보유 중</span>' : ''}${risk ? `<span class="focus-chip ${risk[0]}">선반영 위험 ${risk[1]}</span>` : ''}${ai?.theme ? `<span class="focus-chip">${esc(ai.theme)}</span>` : ''}</div>`
     + (ai ? `<p class="focus-why small"><b>재료</b> ${esc(ai.catalyst)} <span class="muted">· ${esc(ai.reason)}</span></p>` : '<p class="focus-why small muted">일봉 데이터 점수로 선정했습니다.</p>')
     + '</li>';
@@ -439,7 +493,7 @@ function focusColumn(market, entry, fixed, s) {
   } else if (entry && !fixed) {
     body += ai.market_view ? `<p class="focus-view">${esc(ai.market_view)}</p>` : '';
     body += Array.isArray(ai.themes) && ai.themes.length ? `<div class="focus-chips">${ai.themes.map(t => `<span class="focus-chip">${esc(t)}</span>`).join('')}</div>` : '';
-    body += entry.picks.length ? `<ol class="focus-list">${entry.picks.map(p => focusPick(p, held.has(p.symbol))).join('')}</ol>` : empty('조건을 통과한 종목이 없습니다', '이 시장은 오늘 신규 매수 없이 보유분만 관리합니다.');
+    body += entry.picks.length ? `<ol class="focus-list">${entry.picks.map(p => focusPick(p, held.has(p.symbol), entry.profile)).join('')}</ol>` : empty('조건을 통과한 종목이 없습니다', entry.profile === 'volatility' ? '오늘은 하루 변동폭이 충분히 큰 종목이 없어 이 시장은 신규 매수 없이 보유분만 관리합니다.' : '이 시장은 오늘 신규 매수 없이 보유분만 관리합니다.');
     body += (entry.notes || []).map(n => `<p class="small muted">${esc(n)}</p>`).join('');
     body += (ai.avoid || []).length ? `<p class="small muted"><b>오늘 피할 종목</b> ${ai.avoid.map(a => esc(a.symbol) + ' (' + esc(a.reason) + ')').join(' · ')}</p>` : '';
   }
@@ -448,7 +502,10 @@ function focusColumn(market, entry, fixed, s) {
 }
 function renderFocus(s) {
   const cfg = s.focus_config || {}, focus = s.focus || {}, fixed = s.strategy_mode !== 'intraday' || cfg.mode !== 'daily_focus';
-  $('focus-mode').textContent = fixed ? '고정 종목' : `일일 집중 · 시장별 ${cfg.per_market || 3}개`;
+  $('focus-mode').textContent = fixed ? '고정 종목' : `일일 집중 · ${cfg.profile === 'volatility' ? '변동성 우선(단타)' : '추세 우선(스윙)'} · 시장별 ${cfg.per_market || 3}개`;
+  $('focus-intro').textContent = fixed || cfg.profile !== 'volatility'
+    ? '개장 90분 전에 후보 종목을 일봉 데이터로 먼저 거르고(하락 추세·이미 급등한 종목·거래대금 부족은 제외), AI가 뉴스와 테마를 확인해 시장별로 고릅니다. AI는 걸러진 후보 안에서만 고를 수 있고 출처가 없으면 반영하지 않습니다. 오늘 목록 밖의 종목은 신규 매수하지 않으며, 과거 성과 기준이라 수익을 보장하지 않습니다.'
+    : '단타 실험입니다. 개장 90분 전에 후보 종목의 하루 평균 변동폭(고가-저가)과 거래대금·거래량으로 먼저 거르고(움직임이 작은 종목·너무 거친 종목·5일 급락 중인 종목·거래대금 부족은 제외), AI가 오늘 움직일 재료(뉴스·실적·일정)가 있는 종목을 시장별로 고릅니다. 방향은 거르지 않습니다. AI는 걸러진 후보 안에서만 고를 수 있고 출처가 없으면 반영하지 않습니다. 오늘 목록 밖의 종목은 신규 매수하지 않으며, 변동이 크다는 것은 손실 위험도 크다는 뜻이라 수익을 보장하지 않습니다.';
   $('sec-focus').classList.toggle('is-off', fixed);
   for (const m of ['KR', 'US']) setHtml('focus-' + m.toLowerCase(), focusColumn(m, focus[m], fixed, s));
   const rows = Object.entries(s.positions || {}).filter(([, p]) => p.rotation).map(([symbol, p]) => {
@@ -459,7 +516,9 @@ function renderFocus(s) {
   const e = s.focus_eval?.all, pp = v => percent(v).replace('%', '%p');
   $('focus-eval').textContent = !e || !e.days
     ? '선정 성과 채점: 아직 측정된 날이 없습니다. 선정 다음 거래일의 종가가 나오면 후보 전체 평균과 비교해 기록합니다. 표본이 쌓이기 전에는 이 방식의 효과를 판단할 수 없습니다.'
-    : `선정 성과(종가 기준 참고, 표본 ${e.days}일): 선정 평균 ${percent(e.pick_pct)} · 후보 전체 평균 ${percent(e.pool_pct)} · 초과 ${pp(e.excess_pool_pct)}${finite(e.excess_fixed_pct) ? ` · 기존 고정 종목 대비 ${pp(e.excess_fixed_pct)}` : ''} · 이긴 날 ${e.beat_pool_days}/${e.days}. 표본이 적으면 우연일 수 있고 실제 매매 손익과는 다릅니다.`;
+    : (cfg.profile === 'volatility' && e.range_days)
+      ? `선정 성과(다음 거래일 하루 변동폭 기준, 표본 ${e.range_days}일): 선정 평균 ${e.range_pick_pct.toFixed(1)}% · 후보 전체 평균 ${e.range_pool_pct.toFixed(1)}% · 더 크게 움직인 날 ${e.wider_days}/${e.range_days}. 많이 움직였다는 뜻일 뿐 수익을 뜻하지 않고, 표본이 적으면 우연일 수 있습니다.`
+      : `선정 성과(종가 기준 참고, 표본 ${e.days}일): 선정 평균 ${percent(e.pick_pct)} · 후보 전체 평균 ${percent(e.pool_pct)} · 초과 ${pp(e.excess_pool_pct)}${finite(e.excess_fixed_pct) ? ` · 기존 고정 종목 대비 ${pp(e.excess_fixed_pct)}` : ''} · 이긴 날 ${e.beat_pool_days}/${e.days}. 표본이 적으면 우연일 수 있고 실제 매매 손익과는 다릅니다.`;
   const excluded = ['KR', 'US'].map(m => {
     const list = focus[m]?.excluded || [];
     return list.length ? `<h4>${m === 'KR' ? '국내' : '미국'}</h4><ul class="focus-excluded-list">${list.map(x => `<li><strong>${esc(x.name)}</strong> <span class="muted">${esc(x.symbol)}</span> — ${esc((x.reasons || []).join(' · '))}</li>`).join('')}</ul>` : '';
@@ -490,11 +549,16 @@ function renderLive(s) {
   const plan = p => !p ? '—' : p.problems ? '계획 불가' : `손절 ${Number(p.stop_trigger).toLocaleString()} · 익절 ${Number(p.take_profit_trigger).toLocaleString()}`;
   setHtml('live-recent', (sh.recent || []).slice().reverse().map(r => `<tr><td>${clock(r.time)}</td><td>${esc(r.symbol)}</td><td>${r.side === 'BUY' ? '매수' : '매도'}${r.source === 'exit' ? '(청산)' : ''}</td><td>${r.quantity}</td><td>${Number(r.limit_price).toLocaleString()}</td><td>${Number(r.notional).toLocaleString()} ${esc(r.currency)}</td><td>${r.would_submit ? '전송 가능' : '<span class="down">차단</span>'}</td><td>${(r.blocked_by || []).map(code => names[code] || esc(code)).join(', ') || '—'}${r.suggested_quantity && !r.would_submit ? ` (허용 ${r.suggested_quantity}주)` : ''}</td><td>${plan(r.protective)}</td></tr>`).join('') || '<tr><td colspan="9" class="empty-cell">아직 기록된 그림자 주문이 없습니다.</td></tr>');
 }
+const evalShort = {'30':'30분', '60':'60분', d1:'1일', d5:'5일', d21:'21일'};
+const evalKeys = ev => Array.isArray(ev?.active) && ev.active.length ? ev.active : ['30', '60'];
+const evalLabel = (ev, key) => ev?.labels?.[key] || ({'30':'30분 뒤', '60':'60분 뒤'})[key] || key;
 function renderEvalChart(ev) {
-  document.querySelectorAll('#eval-tabs button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.h === evalHorizon)));
+  const keys = evalKeys(ev);
+  if (!keys.includes(evalHorizon)) evalHorizon = keys.includes('d5') ? 'd5' : keys[keys.length - 1];
+  setHtml('eval-tabs', keys.map(k => `<button type="button" data-h="${esc(k)}" aria-pressed="${k === evalHorizon}">${esc(evalLabel(ev, k))}</button>`).join(''));
   const x = ev?.horizons?.[evalHorizon];
   if (!x || !x.scored) {
-    setHtml('eval-chart', empty('아직 채점된 판단이 없습니다', `판단 후 ${evalHorizon}분이 지나면 AI와 단순 규칙의 성과 비교가 이곳에 표시됩니다.`, 'scale'));
+    setHtml('eval-chart', empty('아직 채점된 판단이 없습니다', `채점 시점(${evalLabel(ev, evalHorizon)})이 지나면 AI와 단순 규칙의 성과 비교가 이곳에 표시됩니다.`, 'scale'));
     return;
   }
   const rows = [['AI 판단', x.ai_avg_net_pct, 'ai', `${x.scored}건`], ['항상 관망', x.always_hold_pct, '', ''], ['매번 매수', x.always_buy_avg_net_pct, '', '']]
@@ -510,34 +574,38 @@ $('eval-tabs').onclick = e => {
 function renderEvaluation(s) {
   const ev = s.evaluation, list = s.evaluations || [];
   if (!ev) return;
+  const keys = evalKeys(ev);
   const signed = x => finite(x) ? `<span class="${x > 0 ? 'up' : x < 0 ? 'down' : ''}">${x > 0 ? '+' : ''}${x.toFixed(2)}%</span>` : '—';
   const rate = x => finite(x) ? `${x.toFixed(0)}%` : '—';
   $('eval-sample').textContent = `판단 ${ev.decisions}건 · 채점 대기 ${ev.pending}건`;
   renderEvalChart(ev);
-  const rows = ['30', '60'].map(h => {
+  const rows = keys.map(h => {
     const x = ev.horizons[h];
-    return `<tr><th>${h}분 뒤</th><td>${x.scored}</td><td>${signed(x.ai_avg_net_pct)}</td><td>${signed(x.always_hold_pct)}</td><td>${signed(x.always_buy_avg_net_pct)}</td><td>${x.buy.count}건 · ${signed(x.buy.avg_net_pct)} · 적중 ${rate(x.buy.hit_rate_pct)}</td><td>${x.sell.count}건 · 회피 ${signed(x.sell.avg_avoided_pct)} · 적중 ${rate(x.sell.hit_rate_pct)}</td><td>${x.hold.count}건 · 놓친 상승 ${rate(x.hold.missed_gain_rate_pct)}</td><td>${x.selector.count ? `${signed(x.selector.chosen_abs_move_pct)} vs ${signed(x.selector.others_abs_move_pct)} · 더 큰 움직임 ${rate(x.selector.bigger_mover_rate_pct)}` : '—'}</td></tr>`;
+    return `<tr><th>${esc(evalLabel(ev, h))}</th><td>${x.scored}</td><td>${signed(x.ai_avg_net_pct)}</td><td>${signed(x.always_hold_pct)}</td><td>${signed(x.always_buy_avg_net_pct)}</td><td>${x.buy.count}건 · ${signed(x.buy.avg_net_pct)} · 적중 ${rate(x.buy.hit_rate_pct)}</td><td>${x.sell.count}건 · 회피 ${signed(x.sell.avg_avoided_pct)} · 적중 ${rate(x.sell.hit_rate_pct)}</td><td>${x.hold.count}건 · 놓친 상승 ${rate(x.hold.missed_gain_rate_pct)}</td><td>${x.selector.count ? `${signed(x.selector.chosen_abs_move_pct)} vs ${signed(x.selector.others_abs_move_pct)} · 더 큰 움직임 ${rate(x.selector.bigger_mover_rate_pct)}` : '—'}</td></tr>`;
   }).join('');
   const engines = Object.entries(ev.engines).map(([name, x]) => `${esc(name)} ${x.decisions}건`).join(' · ') || '—';
-  const ruleRows = Object.entries(ruleNames).map(([name, label]) => `<tr><th>${label}</th>` + ['30', '60'].map(h => {
+  const ruleRows = Object.entries(ruleNames).map(([name, label]) => `<tr><th>${label}</th>` + keys.map(h => {
     const r = ev.horizons[h].rules?.[name];
     return r && r.count ? `<td>${r.count}건 · 매매 ${r.trades}</td><td>${signed(r.avg_net_pct)}</td><td>${signed(r.ai_same_avg_net_pct)}</td>` : '<td colspan="3" class="muted">—</td>';
   }).join('') + '</tr>').join('');
+  const primary = keys.includes('d5') ? 'd5' : '60';
   setHtml('eval-summary', `<div class="table-wrap"><table class="eval-table"><thead><tr><th>기준</th><th>채점</th><th>AI 판단(비용 차감)</th><th>항상 관망</th><th>매번 매수</th><th>매수</th><th>매도</th><th>관망</th><th>종목 선정(변동폭)</th></tr></thead><tbody>${rows}</tbody></table></div>`
-    + `<p class="small muted eval-note">${ev.enough_sample ? '' : `⚠ 60분 채점 ${ev.min_sample}건 미만: 운과 실력을 구분하기 어려운 표본입니다. `}AI 판단 = 매수는 수익률, 매도는 하락 회피, 관망은 0%로 계산한 평균입니다. 판단 AI: ${engines}</p>`
-    + `<div class="table-wrap"><table class="eval-table"><thead><tr><th rowspan="2">규칙 기반 비교</th><th colspan="3">30분 뒤</th><th colspan="3">60분 뒤</th></tr><tr><th>채점</th><th>규칙(비용 차감)</th><th>AI(같은 판단)</th><th>채점</th><th>규칙(비용 차감)</th><th>AI(같은 판단)</th></tr></thead><tbody>${ruleRows}</tbody></table></div><p class="small muted eval-note">같은 판단 시점·같은 가격·같은 비용으로 기계적 규칙을 채점한 값입니다. 규칙은 완료된 1분봉으로만 계산하며 튜닝하지 않은 기본값입니다. <strong>AI가 이 단순 규칙보다 꾸준히 낫지 않다면 AI 판단에 의존할 이유가 없습니다.</strong></p>`);
-  const stance = {BUY:'매수',SELL:'매도',HOLD:'관망'}, by = {ai:'AI',user:'직접',server:'순서'};
-  const cell = (e, h) => { const o = e.outcomes[h]; if (!o) return '<span class="muted">대기</span>'; if (o.missed) return '<span class="muted">누락</span>'; return signed(o.returns?.[e.symbol]) + (o.at_close ? ' <span class="muted small">마감</span>' : ''); };
-  setHtml('eval-recent', list.slice().reverse().map(e => `<tr><td>${clock(e.time)}</td><td>${esc(e.symbol)}</td><td>${stance[e.stance] || esc(e.stance)}</td><td>${by[e.selected_by] || esc(e.selected_by)}</td><td>${esc(e.engine.split(' · ')[0])}</td><td>${esc(e.action)}</td><td>${cell(e, '30')}</td><td>${cell(e, '60')}</td></tr>`).join('') || '<tr><td colspan="8" class="empty-cell">아직 기록된 판단이 없습니다.</td></tr>');
+    + `<p class="small muted eval-note">${ev.enough_sample ? '' : `⚠ ${esc(evalLabel(ev, primary))} 채점 ${ev.min_sample}건 미만: 운과 실력을 구분하기 어려운 표본입니다. `}AI 판단 = 매수는 수익률, 매도는 하락 회피, 관망은 0%로 계산한 평균입니다. 판단 AI: ${engines}</p>`
+    + `<div class="table-wrap"><table class="eval-table"><thead><tr><th rowspan="2">규칙 기반 비교</th>${keys.map(h => `<th colspan="3">${esc(evalLabel(ev, h))}</th>`).join('')}</tr><tr>${keys.map(() => '<th>채점</th><th>규칙(비용 차감)</th><th>AI(같은 판단)</th>').join('')}</tr></thead><tbody>${ruleRows}</tbody></table></div><p class="small muted eval-note">같은 판단 시점·같은 가격·같은 비용으로 기계적 규칙을 채점한 값입니다. 규칙은 완료된 봉(1개월 스윙은 일봉, 당일 단타는 1분봉)으로만 계산하며 튜닝하지 않은 기본값입니다. <strong>AI가 이 단순 규칙보다 꾸준히 낫지 않다면 AI 판단에 의존할 이유가 없습니다.</strong></p>`);
+  const stance = {BUY:'매수',SELL:'매도',HOLD:'관망'}, by = {ai:'AI',user:'직접',server:'순서',watch:'조건'};
+  const expects = e => e.horizon === 'month' ? ['d1', 'd5', 'd21'] : ['30', '60'];
+  const cell = (e, h) => { if (!expects(e).includes(h)) return '<span class="muted">—</span>'; const o = e.outcomes[h]; if (!o) return '<span class="muted">대기</span>'; if (o.missed) return '<span class="muted">누락</span>'; return signed(o.returns?.[e.symbol]) + (o.at_close && !h.startsWith('d') ? ' <span class="muted small">마감</span>' : ''); };
+  setHtml('eval-recent-head', '<th>시각</th><th>종목</th><th>판단</th><th>선정</th><th>AI</th><th>처리</th>' + keys.map(h => `<th>${esc(evalShort[h] || h)}</th>`).join(''));
+  setHtml('eval-recent', list.slice().reverse().map(e => `<tr><td>${clock(e.time)}</td><td>${esc(e.symbol)}</td><td>${stance[e.stance] || esc(e.stance)}</td><td>${by[e.selected_by] || esc(e.selected_by)}</td><td>${esc(e.engine.split(' · ')[0])}</td><td>${esc(e.action)}</td>${keys.map(h => `<td>${cell(e, h)}</td>`).join('')}</tr>`).join('') || `<tr><td colspan="${6 + keys.length}" class="empty-cell">아직 기록된 판단이 없습니다.</td></tr>`);
 }
 function renderTeam(s) {
   const run = s.runs.at(-1), roles = roleList(s), intraday = s.strategy_mode === 'intraday';
   $('research-flow').textContent = intraday ? '플래너가 조사 지시 → 기업·차트·뉴스 분석가가 병렬 조사 → 반대 검토자가 약점 확인 → 디렉터가 매매 계획 결정' : '기업·차트·뉴스 분석 → 반대 검토 → 디렉터의 매매 의견';
   $('team').classList.toggle('six-roles',roles.length === 6);
-  $('team-context').textContent = run ? `${s.instruments.find(i => i.symbol === run.symbol)?.name || run.symbol} · ${clock(run.time)} · ${({running:'분석 중',completed:'분석 완료',cancelled:'중지됨',error:'확인 필요'})[run.status] || run.status}` : '실행하면 역할별 분석이 이곳에 쌓입니다.';
+  $('team-context').textContent = run ? `${s.instruments.find(i => i.symbol === run.symbol)?.name || run.symbol} · ${clock(run.time)} · ${({running:'분석 중',completed:'분석 완료',cancelled:'중지됨',error:'확인 필요'})[run.status] || run.status}${run.reuse ? ` · 조사 ${run.reuse.age_minutes}분 전 자료 재사용(AI ${run.reuse.saved_calls}회 절약)` : ''}` : '실행하면 역할별 분석이 이곳에 쌓입니다.';
   setHtml('team', roles.map(({id:role,name},index) => {
     const done = run?.reports.find(r => r.role === role), active = run?.status === 'running' && (run.active_role === role || run.active_roles?.includes(role));
-    return `<article class="agent ${active ? 'active' : done ? 'done' : ''}"><div class="agent-icon">${icon(roleIcons[role] || 'spark')}</div><span class="agent-no">0${index+1}</span><h3>${esc(name)}</h3><p>${active ? '분석 중…' : done ? '검토 완료' : run?.status === 'cancelled' ? '중지됨' : '대기 중'}</p></article>`;
+    return `<article class="agent ${active ? 'active' : done ? 'done' : ''}"><div class="agent-icon">${icon(roleIcons[role] || 'spark')}</div><span class="agent-no">0${index+1}</span><h3>${esc(name)}</h3><p>${active ? '분석 중…' : done ? (done.reused ? `재사용 · ${done.age_minutes}분 전` : '검토 완료') : run?.status === 'cancelled' ? '중지됨' : '대기 중'}</p></article>`;
   }).join(''));
   $('sizing-summary').hidden = !run?.sizing;
   if (run?.sizing) setHtml('sizing-summary', `<div class="sizing-head"><h3>수량 산정</h3><span>최종 제안 <b>${quantity(run.sizing.quantity)}</b></span></div>${sizingDetails(run.sizing,s.instruments.find(i => i.symbol === run.symbol)?.currency)}<p class="muted small">목표·위험·매수 가능 수량 안에서 정수 주식으로 계산합니다. 손절 기준은 체결 가격을 보장하지 않습니다.</p>`);
@@ -545,7 +613,7 @@ function renderTeam(s) {
   if (reportKey !== nextKey) {
     const opened = new Set([...$('reports').querySelectorAll('details[open]')].map(d => d.dataset.role));
     reportKey = nextKey;
-    $('reports').innerHTML = (run?.reports || []).map(r => `<details data-role="${esc(r.role)}" ${opened.has(r.role) || r.role === 'director' || r.role === 'planner' || r.role === 'selector' ? 'open' : ''}><summary>${esc(r.name || names[r.role])} · ${r.role === 'selector' ? '선정 · ' + esc(r.symbol) : r.role === 'planner' ? '조사 브리핑' : esc(({BUY:'매수 의견',SELL:'매도 의견',HOLD:'관망 의견'})[r.stance] || '분석 보고서')}</summary><div class="report-body"><p>${esc(r.summary)}</p>${reportExtras(r)}<ul>${(r.risks || []).map(x => `<li>${esc(x)}</li>`).join('')}</ul>${(r.sources || []).filter(x => safeUrl(x.url)).map(x => `<a href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener noreferrer">${esc(x.title || x.url)} ↗</a>`).join('')}${searchEntryFrame(run,r)}<div class="report-model">${esc(r.engine)} · ${clock(r.time)}${r.usage?.total_tokens ? ' · ' + Number(r.usage.total_tokens).toLocaleString() + ' tokens' : ''}</div></div></details>`).join('') + (run?.error ? `<div class="notice error"><b>${runOld ? '지난 분석 실행의 오류 기록' : '이번 분석 오류'} · ${dateTime(run.time)}</b><br>${esc(run.error)}</div>` : '') + (run?.blocked ? `<div class="notice">${esc(run.blocked)}</div>` : '');
+    $('reports').innerHTML = (run?.reports || []).map(r => `<details data-role="${esc(r.role)}" ${opened.has(r.role) || r.role === 'director' || r.role === 'planner' || r.role === 'selector' ? 'open' : ''}><summary>${esc(r.name || names[r.role])}${r.reused ? ' · 재사용 ' + r.age_minutes + '분 전' : ''} · ${r.role === 'selector' ? '선정 · ' + esc(r.symbol) : r.role === 'planner' ? '조사 브리핑' : esc(({BUY:'매수 의견',SELL:'매도 의견',HOLD:'관망 의견'})[r.stance] || '분석 보고서')}</summary><div class="report-body"><p>${esc(r.summary)}</p>${reportExtras(r)}<ul>${(r.risks || []).map(x => `<li>${esc(x)}</li>`).join('')}</ul>${(r.sources || []).filter(x => safeUrl(x.url)).map(x => `<a href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener noreferrer">${esc(x.title || x.url)} ↗</a>`).join('')}${searchEntryFrame(run,r)}<div class="report-model">${esc(r.engine)} · ${clock(r.time)}${r.usage?.total_tokens ? ' · ' + Number(r.usage.total_tokens).toLocaleString() + ' tokens' : ''}</div></div></details>`).join('') + (run?.error ? `<div class="notice error"><b>${runOld ? '지난 분석 실행의 오류 기록' : '이번 분석 오류'} · ${dateTime(run.time)}</b><br>${esc(run.error)}</div>` : '') + (run?.blocked ? `<div class="notice">${esc(run.blocked)}</div>` : '') + (run?.watch?.note ? `<div class="notice">${run.watch.status === 'waiting' ? '조건 진입 등록 · ' : '조건 진입 계획을 저장하지 않았습니다 · '}${esc(run.watch.note)}</div>` : '');
   }
 }
 function drawChart() {

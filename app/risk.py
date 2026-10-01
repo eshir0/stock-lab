@@ -1,7 +1,9 @@
-"""Deterministic sizing for intraday, cash-funded paper positions."""
+"""Deterministic sizing for cash-funded paper positions (a month-long swing horizon, or the older same-session one)."""
+import math
 import time
 from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
 
+from . import shares
 from .instruments import SYMBOLS
 
 
@@ -11,6 +13,43 @@ class RiskError(ValueError):
 
 # 'daily_focus': a data- and news-checked short list per market each morning; 'fixed': the fixed lineup.
 UNIVERSE_MODES = ('daily_focus', 'fixed')
+
+# 'month': positions are planned for up to a month, are held overnight and are protected by a trailing stop.
+# 'intraday': the older same-session mode (it is also what a saved experiment without a horizon means).
+HORIZONS = ('month', 'intraday')
+MONTH_MINUTES = 30*24*60
+# One place for every number that depends on the horizon: the AI's plan is validated and sized against these.
+BOUNDS = {
+    'month': {'stop': (2, 15), 'take': (3, 40), 'holding': (1440, MONTH_MINUTES), 'default_holding': MONTH_MINUTES,
+              'placeholder': {'stop_loss_pct': 5, 'take_profit_pct': 10, 'max_holding_minutes': 20160}},
+    'intraday': {'stop': (.2, 10), 'take': (.3, 40), 'holding': (15, 240), 'default_holding': 120,
+                 'placeholder': {'stop_loss_pct': 2, 'take_profit_pct': 4, 'max_holding_minutes': 60}},
+}
+# Trailing stop of a month position: once the price is TRAIL_ARM of the way to the target the stop first rises to the
+# entry price plus a small margin for costs, then follows the highest price by the planned stop distance.
+TRAIL_ARM = .5
+BREAKEVEN_PCT = .3
+
+
+def horizon_of(settings):
+    value = (settings or {}).get('horizon', 'intraday')
+    return value if value in HORIZONS else 'intraday'
+
+
+def trailed_stop(position, high_water):
+    """The stop a month position should have now. It only ever rises and never reaches the target price."""
+    stop, take = position.get('stop_price'), position.get('take_profit_price')
+    average, trail = position.get('average'), position.get('trail_pct')
+    if not all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x > 0
+               for x in (stop, take, average, trail, high_water)):
+        return stop
+    if high_water < average+(take-average)*TRAIL_ARM:
+        return stop
+    raised = max(stop, average*(1+BREAKEVEN_PCT/100), high_water*(1-trail/100))
+    if raised <= stop:
+        return stop
+    # Two decimals, and always strictly below the target: at the target the position is sold as a winner anyway.
+    return max(stop, min(round(raised, 2), round(take-.01, 2)))
 
 
 def _decimal(value, name, minimum=None, maximum=None):
@@ -41,6 +80,16 @@ def _quantity(value, name):
     return int(number)
 
 
+def _shares(value, name, fractional):
+    """A share count as a Decimal: whole numbers only, unless the market takes fractional shares (then rounded down to 4 decimals)."""
+    number = _decimal(value, name, 0)
+    if fractional:
+        return shares.floor_to(number, True)
+    if number != number.to_integral_value():
+        raise RiskError(f'{name}: 정수 수량이 필요합니다.')
+    return Decimal(int(number))
+
+
 def normalize_settings(settings=None):
     if settings is None:
         settings = {}
@@ -54,11 +103,18 @@ def normalize_settings(settings=None):
         raise RiskError('종목 구성 방식은 daily_focus 또는 fixed여야 합니다.')
     risk = _decimal(settings.get('risk_per_trade_pct', .5), '거래당 위험 비율', .1, 2)
     daily = _decimal(settings.get('daily_loss_limit_pct', 2), '일일 손실 한도', 1, 10)
-    holding = _decimal(settings.get('max_holding_minutes', 120), '최대 보유 시간', 15, 240)
+    horizon = settings.get('horizon', 'intraday')
+    if horizon not in HORIZONS:
+        raise RiskError('투자 기간은 month 또는 intraday여야 합니다.')
+    low, high = BOUNDS[horizon]['holding']
+    holding = _decimal(settings.get('max_holding_minutes', BOUNDS[horizon]['default_holding']), '최대 보유 시간', low, high)
     if holding != holding.to_integral_value():
         raise RiskError('최대 보유 시간은 정수 분으로 입력하세요.')
-    return {'include_leveraged_etfs': leveraged, 'universe_mode': universe, 'risk_per_trade_pct': float(risk),
-            'daily_loss_limit_pct': float(daily), 'max_holding_minutes': int(holding)}
+    # The most of the account one name may take. Saved experiments without it keep the old 30%.
+    position = _decimal(settings.get('max_position_pct', 30), '종목당 최대 비중', 10, 100)
+    return {'include_leveraged_etfs': leveraged, 'universe_mode': universe, 'horizon': horizon,
+            'risk_per_trade_pct': float(risk), 'daily_loss_limit_pct': float(daily), 'max_holding_minutes': int(holding),
+            'max_position_pct': shares.number(position)}
 
 
 def _instrument(symbol):
@@ -71,6 +127,32 @@ def _instrument(symbol):
     return instrument, factor
 
 
+def _round_trip_cost(config, currency, quote):
+    """What one buy and one sell cost, in percent of the price (a Decimal): both fees, both slippages, the Korean sell tax and the
+    quoted spread."""
+    bid, ask = _decimal(quote.get('bid'), '매수 호가', .00000001), _decimal(quote.get('ask'), '매도 호가', .00000001)
+    fee = _decimal(config.fee_kr if currency == 'KRW' else config.fee_us, '수수료', 0, 1000)
+    slip = _decimal(config.slippage_bps, '슬리피지', 0, 1000)
+    tax = _decimal(config.sell_tax_kr, '매도세', 0, 1000) if currency == 'KRW' else Decimal('0')
+    spread = (ask-bid)/((ask+bid)/2)*10000 if ask >= bid else Decimal('0')
+    return (2*fee+2*slip+tax+spread)/100
+
+
+def _min_take(config, currency, quote):
+    ratio = Decimal(str(getattr(config, 'min_take_cost_ratio', 0) or 0))
+    return ratio*_round_trip_cost(config, currency, quote) if ratio > 0 else Decimal('0')
+
+
+def round_trip_cost_pct(config, currency, quote):
+    """The round-trip cost in percent. The judgement scoring deducts the same estimate (`DeskMixin.trade_cost_bps`)."""
+    return float(_round_trip_cost(config, currency, quote))
+
+
+def min_take_pct(config, currency, quote):
+    """The narrowest take-profit (percent) a buy may have: `MIN_TAKE_COST_RATIO` times the round-trip cost; 0 when the rule is off."""
+    return float(_min_take(config, currency, quote))
+
+
 def _stop_exit(stop, spread, slip, sell_fee):
     price = max(Decimal('0'), stop-spread)*(1-slip)
     return max(Decimal('0'), price*(1-sell_fee))
@@ -81,12 +163,14 @@ def size_order(state, symbol, quote, decision, constraints, config, now=None):
     now = time.time() if now is None else now
     _decimal(now, '현재 시각', 0)
     settings = normalize_settings(state.get('strategy_settings'))
+    bounds = BOUNDS[settings['horizon']]
     instrument, factor = _instrument(symbol)
     currency = instrument['currency']
     side = decision.get('stance')
     if side not in ('BUY', 'SELL'):
         raise RiskError('매수 또는 매도 판단이 필요합니다.')
-    weight = _decimal(decision.get('target_weight_pct'), '목표 종목 비중', 0, 30)
+    weight = _decimal(decision.get('target_weight_pct'), '목표 종목 비중', 0, settings['max_position_pct'])
+    fractional = bool(constraints.get('fractional_shares'))
     nav = _decimal(constraints.get('portfolio_equity'), '평가 자산', 0)
     ask = _decimal(quote.get('ask'), '매도 호가', .00000001)
     bid = _decimal(quote.get('bid'), '매수 호가', .00000001)
@@ -96,27 +180,27 @@ def size_order(state, symbol, quote, decision, constraints, config, now=None):
     fee = _decimal(config.fee_kr if currency == 'KRW' else config.fee_us, '수수료', 0, 1000)/10000
     tax = _decimal(config.sell_tax_kr, '매도세', 0, 1000)/10000 if currency == 'KRW' else Decimal('0')
     sell_fee = fee+tax
-    held = _quantity(state.get('positions', {}).get(symbol, {}).get('quantity', 0), '보유 수량')
-    max_buy = min(10000, _quantity(constraints.get('max_buy_quantity', 0), '최대 매수 수량'))
-    max_sell = min(10000, held, _quantity(constraints.get('max_sell_quantity', held), '최대 매도 수량'))
+    held = _shares(state.get('positions', {}).get(symbol, {}).get('quantity', 0), '보유 수량', fractional)
+    max_buy = min(Decimal(shares.MAX_QUANTITY), _shares(constraints.get('max_buy_quantity', 0), '최대 매수 수량', fractional))
+    max_sell = min(Decimal(shares.MAX_QUANTITY), held, _shares(constraints.get('max_sell_quantity', held), '최대 매도 수량', fractional))
     entry = _money(ask*(1+slip))
     if entry <= 0:
         raise RiskError('체결 단가가 최소 계산 단위보다 작습니다.')
-    target_total = _floor(nav*weight/100/entry)
-    target_delta = max(0, target_total-held) if side == 'BUY' else max(0, held-target_total)
-    result = {'quantity': 0, 'target_quantity': target_delta, 'risk_quantity': 0,
-              'max_buy_quantity': max_buy, 'estimated_stop_risk': 0.0, 'reason': '',
+    target_total = shares.floor_to(nav*weight/100/entry, fractional)
+    target_delta = max(Decimal(0), target_total-held) if side == 'BUY' else max(Decimal(0), held-target_total)
+    result = {'quantity': 0, 'target_quantity': shares.number(target_delta), 'risk_quantity': 0,
+              'max_buy_quantity': shares.number(max_buy), 'estimated_stop_risk': 0.0, 'reason': '',
               'stop_price': None, 'take_profit_price': None, 'expires_at': None}
     if side == 'SELL':
         quantity = min(target_delta, max_sell)
-        result.update(quantity=quantity, reason='목표 비중까지 보유 수량을 줄입니다.' if quantity else '이미 목표 비중 이하입니다.')
+        result.update(quantity=shares.number(quantity), reason='목표 비중까지 보유 수량을 줄입니다.' if quantity else '이미 목표 비중 이하입니다.')
         return result
 
-    stop_pct = _decimal(decision.get('stop_loss_pct'), '손절 비율', .2, 10)
+    stop_pct = _decimal(decision.get('stop_loss_pct'), '손절 비율', *bounds['stop'])
     take_pct = _decimal(decision.get('take_profit_pct'), '익절 비율', 0, 40)
     if take_pct < stop_pct*Decimal('1.5'):
         raise RiskError('익절 비율은 손절 비율의 1.5배 이상이어야 합니다.')
-    holding = _decimal(decision.get('max_holding_minutes'), '계획 보유 시간', 15, 240)
+    holding = _decimal(decision.get('max_holding_minutes'), '계획 보유 시간', *bounds['holding'])
     if holding != holding.to_integral_value():
         raise RiskError('계획 보유 시간은 정수 분이어야 합니다.')
     session_end = _decimal(quote.get('session_end'), '장 종료 시각', 0)
@@ -124,7 +208,9 @@ def size_order(state, symbol, quote, decision, constraints, config, now=None):
     take = _money(entry*(1+take_pct/100))
     if not Decimal('0') < stop < entry < take:
         raise RiskError('손절·익절 가격이 유효한 간격을 만들지 못합니다.')
-    expiry = min(float(session_end)-120, now+min(int(holding), settings['max_holding_minutes'])*60)
+    until = now+min(int(holding), settings['max_holding_minutes'])*60
+    # A month position is held overnight; only the older same-session mode has to be closed before the session ends.
+    expiry = until if settings['horizon'] == 'month' else min(float(session_end)-120, until)
     result.update(stop_price=float(stop), take_profit_price=float(take), expires_at=expiry)
     if factor > 1 and not settings['include_leveraged_etfs']:
         result['reason'] = '이 실험은 레버리지 ETF 신규 매수를 허용하지 않습니다.'
@@ -134,6 +220,11 @@ def size_order(state, symbol, quote, decision, constraints, config, now=None):
         return result
     if nav == 0:
         result['reason'] = '해당 통화의 가상 자산이 없습니다.'
+        return result
+    floor = _min_take(config, currency, quote)
+    if floor > 0 and take_pct < floor:
+        result['reason'] = (f'익절 폭 {float(take_pct):g}%가 왕복 비용({float(_round_trip_cost(config, currency, quote)):.2f}%)의 '
+                            f'{float(config.min_take_cost_ratio):g}배(최소 {float(floor):.2f}%)에 못 미쳐 매수하지 않습니다. 목표가 비용에 잡아먹히는 거래입니다.')
         return result
 
     spread = ask-bid
@@ -146,7 +237,7 @@ def size_order(state, symbol, quote, decision, constraints, config, now=None):
         held_instrument, held_factor = _instrument(held_symbol)
         if held_instrument['currency'] != currency:
             continue
-        quantity = _quantity(position.get('quantity', 0), '보유 수량')
+        quantity = _shares(position.get('quantity', 0), '보유 수량', fractional)
         if not quantity:
             continue
         mark_quote = quote if held_symbol == symbol else state.get('quotes', {}).get(held_symbol, {})
@@ -165,12 +256,17 @@ def size_order(state, symbol, quote, decision, constraints, config, now=None):
         basis = _decimal(basis, '보유 종목 원가', 0)/quantity if basis is not None else _decimal(position.get('average'), '보유 종목 평균가', 0)
         open_risk += max(Decimal('0'), max(basis, mark)-_stop_exit(held_stop, held_ask-held_bid, slip, sell_fee))*quantity
     total_budget = max(Decimal('0'), trade_budget*3-open_risk)
-    risk_quantity = max(0, _floor(min(trade_budget, total_budget)/risk_per_share))
-    exposure_quantity = max(0, _floor(max(Decimal('0'), nav-exposure)/(entry*factor)))
+    risk_quantity = max(Decimal(0), shares.floor_to(min(trade_budget, total_budget)/risk_per_share, fractional))
+    exposure_quantity = max(Decimal(0), shares.floor_to(max(Decimal('0'), nav-exposure)/(entry*factor), fractional))
     quantity = min(target_delta, risk_quantity, max_buy, exposure_quantity)
-    result.update(quantity=quantity, risk_quantity=risk_quantity,
+    too_small = quantity > 0 and shares.below_minimum(quantity, entry, fractional)
+    if too_small:
+        quantity = Decimal(0)
+    result.update(quantity=shares.number(quantity), risk_quantity=shares.number(risk_quantity),
                   estimated_stop_risk=float(_money(risk_per_share*quantity)))
-    if quantity:
+    if too_small:
+        result['reason'] = '소수점 주문은 최소 1달러 이상이어야 해서 이번 주문은 보류합니다.'
+    elif quantity:
         result['reason'] = '목표 비중·거래당 위험·총 손절 위험·ETF 환산 노출·현금 한도 안에서 수량을 계산했습니다.'
     elif target_delta == 0:
         result['reason'] = '목표 비중에 이미 도달했거나 1주를 살 만큼의 목표 금액이 없습니다.'

@@ -57,6 +57,7 @@ def create_app(config=None, background=True, test=False):
                 await asyncio.to_thread(engine.refresh)
                 await asyncio.to_thread(engine.process_desk_exits)
                 await asyncio.to_thread(engine.process_liquidation)
+                await asyncio.to_thread(engine.process_entry_watches)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -77,6 +78,12 @@ def create_app(config=None, background=True, test=False):
         while True:
             try:
                 await asyncio.to_thread(engine.refresh_focus)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            try:
+                await asyncio.to_thread(engine.score_days)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -262,13 +269,15 @@ def create_app(config=None, background=True, test=False):
         seed_krw: float = Field(ge=0, le=1e12, allow_inf_nan=False, strict=True)
         seed_usd: float = Field(ge=0, le=1e9, allow_inf_nan=False, strict=True)
         name: str = Field(default='', max_length=80)
-        max_order_pct: float = Field(default=30, ge=1, le=30, allow_inf_nan=False, strict=True)
+        max_order_pct: float = Field(default=30, ge=1, le=100, allow_inf_nan=False, strict=True)
+        max_position_pct: float | None = Field(default=None, ge=10, le=100, allow_inf_nan=False, strict=True)
         strategy_mode: Literal['legacy', 'intraday'] = 'legacy'
         include_leveraged_etfs: bool = Field(default=True, strict=True)
         universe_mode: Literal['daily_focus', 'fixed'] = 'daily_focus'
+        horizon: Literal['month', 'intraday'] = 'month'
         risk_per_trade_pct: float = Field(default=.5, ge=.1, le=2, allow_inf_nan=False, strict=True)
         daily_loss_limit_pct: float = Field(default=2, ge=1, le=10, allow_inf_nan=False, strict=True)
-        max_holding_minutes: int = Field(default=120, ge=15, le=240, strict=True)
+        max_holding_minutes: int | None = Field(default=None, ge=15, le=43200, strict=True)
         confirmation: str
 
     @app.post('/api/experiments')
@@ -278,10 +287,13 @@ def create_app(config=None, background=True, test=False):
         result = engine.new_experiment(data.seed_krw, data.seed_usd, data.name, data.max_order_pct,
                                       strategy_mode=data.strategy_mode, strategy_settings={
                                           'include_leveraged_etfs': data.include_leveraged_etfs,
-                                          'universe_mode': data.universe_mode,
+                                          'universe_mode': data.universe_mode, 'horizon': data.horizon,
+                                          'max_position_pct': (data.max_position_pct if data.max_position_pct is not None
+                                                               else 100 if data.horizon == 'intraday' else 30),
                                           'risk_per_trade_pct': data.risk_per_trade_pct,
                                           'daily_loss_limit_pct': data.daily_loss_limit_pct,
-                                          'max_holding_minutes': data.max_holding_minutes})
+                                          **({'max_holding_minutes': data.max_holding_minutes}
+                                             if data.max_holding_minutes is not None else {})})
         return {'ok': True, 'experiment_id': result['experiment_id']}
 
     @app.get('/api/experiments')

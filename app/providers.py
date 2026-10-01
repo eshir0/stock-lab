@@ -81,16 +81,17 @@ class DemoProvider:
                 'session_start': now-86400, 'session_end': now+86400,
                 'session': '합성 시세 · 거래 시간 제한 없음'}
 
-    def candles(self, symbol, interval='1d'):
+    def candles(self, symbol, interval='1d', count=None):
         if interval not in ('1d', '1m'):
             raise ProviderError('지원하지 않는 캔들 간격입니다.')
         p = SYMBOLS[symbol]['demo_base']
         step = 60 if interval == '1m' else 86400
         end = int(time.time()//step)*step
         bars = []
-        for j in range(60):
+        size = max(1, min(200, int(count or 60)))
+        for j in range(size):
             close = round(p*(1+.02*math.sin(j/6)), 2)
-            bars.append({'time': end-(60-j)*step, 'open': close, 'high': round(close*1.002, 2),
+            bars.append({'time': end-(size-j)*step, 'open': close, 'high': round(close*1.002, 2),
                          'low': round(close*.998, 2), 'close': close, 'volume': 100000+j*1000,
                          'currency': SYMBOLS[symbol]['currency'], 'interval': interval, 'completed': True})
         return bars
@@ -270,11 +271,12 @@ class TossProvider:
     def investor_trading(self, symbol, count=5):
         return self.get(f'/api/v1/stocks/{symbol}/investor-trading', {'count': count})
 
-    def candles(self, symbol, interval='1d'):
+    def candles(self, symbol, interval='1d', count=None):
         if interval not in ('1d', '1m'):
             raise ProviderError('지원하지 않는 캔들 간격입니다.')
+        size = max(1, min(200, int(count))) if count else (120 if interval == '1m' else 60)
         data = self.get('/api/v1/candles', {'symbol': symbol, 'interval': interval,
-                                         'count': 120 if interval == '1m' else 60, 'adjusted': 'true'})
+                                         'count': size, 'adjusted': 'true'})
         now, rows, seen = time.time(), [], set()
         try:
             for item in data['candles']:

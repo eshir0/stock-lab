@@ -16,6 +16,7 @@ from .agents import STOPPED
 from .desk import DESK_CALLS
 from .instruments import CATALOGUE, INSTRUMENTS, SYMBOLS
 from .providers import ProviderError, RateLimited
+from .risk import horizon_of
 from .store import event
 
 MARKETS = ('KR', 'US')
@@ -26,7 +27,7 @@ RETRY_SECONDS = 600          # wait between failed builds
 AI_RETRY_SECONDS = 600
 MAX_BUILD_FAILURES = 3       # after this many failures the session falls back to the fixed lineup
 MIN_MEASURED = 5             # fewer measurable names than this means the data feed is unusable
-METRIC_KEYS = ('last', 'sma20', 'ret_1m_pct', 'ret_5d_pct', 'ext_20d_pct', 'atr_pct')
+METRIC_KEYS = ('last', 'sma20', 'ret_1m_pct', 'ret_5d_pct', 'ext_20d_pct', 'atr_pct', 'range_pct', 'avg_move_pct', 'volume_ratio')
 
 
 def universe_mode(state):
@@ -38,6 +39,12 @@ class FocusData(Exception):
 
 
 class FocusMixin:
+    @staticmethod
+    def focus_profile(state):
+        """What a good name looks like for this experiment: day trading wants names that move a lot within a day,
+        a month plan wants rising, not yet stretched names (see universe.PROFILES)."""
+        return 'volatility' if horizon_of(state.get('strategy_settings')) == 'intraday' else 'trend'
+
     focus_pause = .25          # seconds between daily-candle reads: gentle on the chart rate group
     focus_retry_pause = 3.0    # seconds to wait after a 429 from the chart group before asking again
 
@@ -126,6 +133,10 @@ class FocusMixin:
                 continue
             entry = (state.get('focus') or {}).get(market)
             same_session = bool(entry) and entry.get('session_date') == session_date
+            if same_session and entry.get('status') != 'fallback' and 'afford' not in entry:
+                self.refit_focus(market, session_date)         # a list built before buying power was checked
+                state = self.store.read()
+                entry = (state.get('focus') or {}).get(market)
             if same_session and (entry.get('status') == 'fallback' or not self.focus_ai_upgrade_due(state, entry, now)):
                 continue
             if not same_session and not self.focus_retry_due(market, session_date, now):
@@ -135,6 +146,41 @@ class FocusMixin:
                 self.focus_attempts[market] = (now, 0, session_date)
             except Exception as exc:
                 self.focus_failed(state, market, session_date, start, end, now, exc)
+
+    def refit_focus(self, market, session_date):
+        """Drop the picks the account cannot buy even one share of, keep the AI's picks that fit, and refill from the same
+        ranking. Runs once per list and reads no market data."""
+        with self.store.edit() as s:
+            entry = (s.get('focus') or {}).get(market)
+            if not entry or entry.get('session_date') != session_date or 'afford' in entry or entry.get('status') == 'fallback':
+                return
+            budget = {c: self.position_cap(s, c) for c in ('KRW', 'USD') if not self.fractional(c)}
+            entry['afford'] = {c: round(v, 2) for c, v in budget.items()}
+            fits = lambda p: not universe.unaffordable(p, p, budget)
+            ranked = entry.get('ranked') or []
+            keep = [p for p in entry['picks'] if fits(p)]
+            dropped = [p for p in entry['picks'] if not fits(p)]
+            avoid = ({a.get('symbol') for a in (entry.get('ai') or {}).get('avoid', []) if isinstance(a, dict)}
+                     if entry.get('status') == 'ok' else set())
+            taken = {p['symbol'] for p in keep}
+            for p in ranked:
+                if len(keep) >= (entry.get('per_market') or self.c.focus_per_market):
+                    break
+                if p['symbol'] not in taken and p['symbol'] not in avoid and fits(p):
+                    keep.append({**p, 'source': 'data', 'ai': None})
+                    taken.add(p['symbol'])
+            known = {x['symbol'] for x in entry['excluded']}
+            for p in ranked:
+                if not fits(p) and p['symbol'] not in known:
+                    entry['excluded'].append({'symbol': p['symbol'], 'name': p['name'], 'reasons': universe.unaffordable(p, p, budget)})
+            entry['picks'], entry['ranked'] = keep, [p for p in ranked if fits(p)]
+            for record in s.get('focus_history') or []:
+                if record.get('market') == market and record.get('session_date') == session_date:
+                    record['picks'] = [p['symbol'] for p in keep]
+            if dropped:
+                names = ', '.join(p['name'] for p in dropped)
+                event(s, f'{LABELS[market]} 오늘의 집중 종목에서 이 원금으로는 1주도 살 수 없는 종목({names})을 빼고 다시 채웠습니다: '
+                      + (', '.join(p['name'] for p in keep) or '살 수 있는 종목 없음'))
 
     def focus_failed(self, state, market, session_date, start, end, now, exc):
         _, failures, date = self.focus_attempts.get(market, (0, 0, session_date))
@@ -177,14 +223,17 @@ class FocusMixin:
             metrics[symbol] = universe.daily_metrics(rows, now)
         return series, metrics
 
-    def run_trend_brief(self, state, market, session_date, passed, meta, now):
+    def run_trend_brief(self, state, market, session_date, passed, meta, now, profile='trend'):
         """Ask the AI for a news/theme read of the names that passed the data screen. Failure only removes the read."""
-        context = {'strategy_mode': 'intraday', 'as_of_utc': datetime.now(timezone.utc).isoformat(), 'date': session_date,
-                   'market': market, 'market_name': LABELS[market], 'max_picks': self.c.focus_per_market,
+        guards = ({'range_floor_pct': {k: v['range'][0] for k, v in universe.VOL_CAPS.items()},
+                   'falling_knife_5d_pct': universe.FALLING_KNIFE_5D} if profile == 'volatility' else
+                  {'ext_20d_cap_pct': {k: v['ext'] for k, v in universe.CAPS.items()},
+                   'run_5d_cap_pct': {k: v['run5'] for k, v in universe.CAPS.items()}})
+        context = {'strategy_mode': 'intraday', 'profile': profile, 'as_of_utc': datetime.now(timezone.utc).isoformat(),
+                   'date': session_date, 'market': market, 'market_name': LABELS[market], 'max_picks': self.c.focus_per_market,
                    'candidates': universe.ai_candidates(passed),
                    'held': sorted(s for s in state.get('positions', {}) if SYMBOLS.get(s, {}).get('market') == market),
-                   'guards': {'ext_20d_cap_pct': {k: v['ext'] for k, v in universe.CAPS.items()},
-                              'run_5d_cap_pct': {k: v['run5'] for k, v in universe.CAPS.items()}}}
+                   'guards': guards}
         meta = dict(meta, attempts=meta.get('attempts', 0)+1, last_attempt=now)
         try:
             report = self.agents.run('trend', context, state['generation'])
@@ -198,6 +247,8 @@ class FocusMixin:
     def build_focus(self, state, market, session_date, start, end, existing, now):
         """Score the market's pool, add the AI's read if it is available, and publish the list."""
         include = state['strategy_settings'].get('include_leveraged_etfs', False)
+        profile = self.focus_profile(state)
+        budget = {c: self.position_cap(state, c) for c in ('KRW', 'USD') if not self.fractional(c)}   # fractional shares always fit
         held = set(state.get('positions') or {})
         rank_items = [i for i in CATALOGUE if i['market'] == market and (include or not i.get('leveraged_etf'))]
         extra = [i for i in CATALOGUE if i['market'] == market and i['symbol'] in held and i not in rank_items]
@@ -207,7 +258,7 @@ class FocusMixin:
             measured = sum(1 for m in metrics.values() if m)
             if measured < MIN_MEASURED:
                 raise FocusData(f'일봉을 읽을 수 있는 종목이 {measured}개뿐입니다.')
-            passed, excluded = universe.rank_pool(rank_items, metrics, self.intel.attention(market), self.c.mode != 'toss')
+            passed, excluded = universe.rank_pool(rank_items, metrics, self.intel.attention(market), self.c.mode != 'toss', profile, budget)
             meta = {'status': 'none', 'attempts': 0, 'last_attempt': 0}
         else:
             passed, excluded = existing['ranked'], existing['excluded']
@@ -216,13 +267,14 @@ class FocusMixin:
             meta = dict(existing.get('ai') or {'status': 'none', 'attempts': 0, 'last_attempt': 0})
         report = None
         if passed and self.focus_ai_wanted(state):
-            report, meta = self.run_trend_brief(state, market, session_date, passed, meta, now)
+            report, meta = self.run_trend_brief(state, market, session_date, passed, meta, now, profile)
         elif meta.get('status') == 'none' and not self.c.focus_ai:
             meta['status'] = 'skipped'
         picks, notes = universe.choose(passed, report, self.c.focus_per_market)
         grounded = bool(report and report.get('grounded'))
         avoid = {a['symbol'] for a in (report or {}).get('avoid', [])} if grounded else set()
         entry = {'market': market, 'session_date': session_date, 'built_at': now, 'session_start': start, 'session_end': end,
+                 'profile': profile, 'afford': {c: round(v, 2) for c, v in budget.items()},
                  'status': 'ok' if grounded else 'quant_only', 'source': 'ai+data' if grounded else 'data',
                  'per_market': self.c.focus_per_market, 'candidates': len(rank_items), 'measured': measured,
                  'picks': picks, 'ranked': passed, 'excluded': excluded, 'notes': notes,
@@ -281,6 +333,7 @@ class FocusMixin:
         elif series is not None:
             metrics = entry['metrics']
             history.append({'market': market, 'session_date': entry['session_date'], 'built_at': now,
+                            'profile': entry.get('profile', 'trend'),
                             'ref': {item['symbol']: [self.ref_time(series, item['symbol']), metrics[item['symbol']]['last']]
                                     for item in rank_items if item['symbol'] in metrics},
                             'picks': picks, 'fixed': [i for i in self.fixed_symbols(s, market) if i in metrics],

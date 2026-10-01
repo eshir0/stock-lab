@@ -25,7 +25,7 @@ def _valuation(s, currency, now, quote_age):
     for symbol, pos in s['positions'].items():
         if SYMBOLS.get(symbol, {}).get('currency') != currency:
             continue
-        qty = pos['quantity']
+        qty = Decimal(str(pos['quantity']))          # fractional US shares are floats in the ledger
         if qty <= 0:
             continue
         q = s['quotes'].get(symbol, {})
@@ -38,7 +38,7 @@ def _valuation(s, currency, now, quote_age):
         # quotes must not contaminate even the displayed account estimate.
         mark = price if valid_price and valid_identity else pos['average']
         holdings_value += Decimal(str(mark))*qty
-        basis += Decimal(str(pos.get('cost_basis', _money(pos['average']*qty))))
+        basis += Decimal(str(pos.get('cost_basis', _money(Decimal(str(pos['average']))*qty))))
     return _money(value+holdings_value), _money(holdings_value-basis), bool(fresh)
 
 

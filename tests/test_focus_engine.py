@@ -44,7 +44,7 @@ class FocusProvider(DemoProvider):
             q.update(session_start=window[0], session_end=window[1])
         return q
 
-    def candles(self, symbol, interval='1d'):
+    def candles(self, symbol, interval='1d', count=None):
         if interval != '1d':
             return super().candles(symbol, interval)
         if self.limited_from is not None and len(self.calls) >= self.limited_from:
@@ -68,7 +68,9 @@ def make(tmp_path, mode='demo', settings=None):
     engine = Engine(config, store, FocusProvider())
     engine.focus_pause = engine.focus_retry_pause = 0
     engine.boot()
-    engine.new_experiment(1000000, 1000, 'focus test', strategy_mode='intraday', strategy_settings=settings)
+    # These tests are about the rising-trend screen (a month plan); day trading has its own file, test_day_focus.py.
+    # A large virtual account, so none of these tests is about affordability (test_affordability.py is).
+    engine.new_experiment(10_000_000, 10_000, 'focus test', strategy_mode='intraday', strategy_settings={'horizon': 'month', **(settings or {})})
     return engine, store
 
 
@@ -186,7 +188,7 @@ def test_reference_prices_and_working_data_stay_server_side(engine):
     public = engine.public_state()
     assert all('ranked' not in e and 'metrics' not in e for e in public['focus'].values())
     assert all('ref' not in r for r in public['focus_history'])
-    assert public['focus_config'] == {'mode': 'daily_focus', 'per_market': 3, 'ai': True}
+    assert public['focus_config'] == {'mode': 'daily_focus', 'per_market': 3, 'ai': True, 'profile': 'trend'}
 
 
 # ---- the AI read: optional, checked, never trusted with symbols ----------------------------------------------------------
@@ -474,7 +476,7 @@ def client(tmp_path):
 def experiment(**over):
     body = {'seed_krw': 1000000, 'seed_usd': 1000, 'name': 'x', 'max_order_pct': 30, 'strategy_mode': 'intraday',
             'include_leveraged_etfs': True, 'risk_per_trade_pct': .5, 'daily_loss_limit_pct': 2, 'max_holding_minutes': 120,
-            'confirmation': '새 실험 시작'}
+            'horizon': 'intraday', 'confirmation': '새 실험 시작'}
     body.update(over)
     return body
 
