@@ -393,6 +393,12 @@ def generate(request):
         _slots[provider].release()
 
 
+def should_log(path, status):
+    """The app reads /usage every few seconds; a successful read is routine and would fill the journal (1,400 lines a day).
+    Everything else - generate calls, refusals, errors - is still logged."""
+    return not (str(path).split('?')[0] == '/usage' and str(status) == '200')
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def _send(self, status, payload):
         body = json.dumps(payload, ensure_ascii=False).encode()
@@ -436,6 +442,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._send(*generate(request if isinstance(request, dict) else {}))
 
     def log_message(self, fmt, *args):
+        if not should_log(self.path, args[1] if len(args) > 1 else ''):
+            return
         print('%s %s' % (self.address_string(), fmt % args), flush=True)
 
 

@@ -186,6 +186,7 @@ def test_the_same_name_is_not_analysed_again_within_hours_unless_it_moves(desk):
     assert len(desk.calls) == first
     assert {c['symbol']: c['reason'] for c in state['desk_gate']['checked']}['005930'] == 'recent'
     desk.provider.prices['005930'] = 70000.0*1.04
+    desk.refresh()                                     # the next poll sees the move
     run_cycle(desk)
     assert len(desk.calls) == first+6
 
@@ -236,8 +237,10 @@ def test_a_market_the_poll_saw_closed_is_not_asked_about_again(desk):
     desk.refresh()                                      # the poll records the closed quotes
     desk.provider.quote_calls.clear()
     run_cycle(desk)
+    state = desk.store.read()
     assert 'AAPL' not in desk.provider.quote_calls and 'MSFT' not in desk.provider.quote_calls
-    assert {'005930', '000660'} <= set(desk.provider.quote_calls)       # the open market is still checked
+    # the open market is still checked, on the quotes the poll just fetched (no second call for them either)
+    assert {c['symbol'] for c in state['desk_gate']['checked']} == {'005930', '000660'}
 
 
 def test_the_older_same_session_mode_is_not_gated(tmp_path):
@@ -399,3 +402,86 @@ def test_the_holding_limit_must_fit_a_month_plan_and_day_trading_can_no_longer_b
     assert client.get('/api/state').json()['strategy_settings']['horizon'] == 'month'
     assert client.post('/api/experiments', json=experiment(horizon='year')).status_code == 422
     assert client.post('/api/experiments', json=experiment(max_holding_minutes=50000)).status_code == 422
+
+
+# ---- why a name was not analysed ----------------------------------------------------------------------------------------------
+
+def test_the_gate_says_why_daily_data_is_missing(desk):
+    desk.provider.fail_daily.add('005930')
+    desk.provider.daily['000660'] = bars(series(180000, 'quiet')[:10])
+    state = run_cycle(desk)
+    checked = {c['symbol']: c for c in state['desk_gate']['checked']}
+    assert checked['005930']['reason'] == 'no_data' and checked['005930']['detail'] == 'daily bars unavailable'
+    assert checked['000660']['detail'] == '완료된 일봉 10개 (필요 23개)'
+    assert 'detail' not in checked.get('AAPL', {}) and desk.calls == []
+
+
+def test_the_desk_records_why_each_name_was_left_out_of_a_round(desk, monkeypatch):
+    real = desk.provider.candles
+
+    def candles(symbol, interval='1d', count=None):
+        if symbol == '000660' and interval == '1m':
+            raise ProviderError('캔들 데이터의 시각·통화·가격을 검증하지 못했습니다.')
+        return real(symbol, interval, count)
+    monkeypatch.setattr(desk.provider, 'candles', candles)
+    state = run_cycle(desk)
+    scan = state['desk_scan']
+    assert scan['skipped']['000660'].startswith('캔들 데이터') and '005930' not in scan['skipped'] and scan['repairs'] == {}
+    desk.provider.closed = {'005930', '000660', 'AAPL', 'MSFT'}
+    desk.refresh()
+    state = run_cycle(desk)                                    # nothing to analyse: the scan is still saved with the wait
+    assert state['desk_scan']['time'] > scan['time'] and state['desk_scan']['skipped'] == {}
+
+
+def test_a_name_without_enough_minute_candles_is_listed_with_the_reason(desk, monkeypatch):
+    real = desk.provider.candles
+    monkeypatch.setattr(desk.provider, 'candles', lambda symbol, interval='1d', count=None:
+                        real(symbol, interval, count)[-5:] if symbol == '000660' and interval == '1m' else real(symbol, interval, count))
+    state = run_cycle(desk)
+    assert state['desk_scan']['skipped']['000660'].startswith('당일 완료된 1분봉 20개')
+
+
+def test_repaired_candle_data_is_reported(desk):
+    desk.provider.candle_notes = {'005930:1d': {'time': time.time(), 'repaired': 2, 'dropped': 1, 'kept': 69},
+                                  'AAPL:1m': {'time': time.time(), 'repaired': 0, 'dropped': 0, 'kept': 120},
+                                  'MSFT:1d': {'time': time.time()-7200, 'repaired': 5, 'dropped': 0, 'kept': 70}}
+    state = run_cycle(desk)
+    assert state['desk_scan']['repairs'] == {'005930:1d': {'time': desk.provider.candle_notes['005930:1d']['time'], 'repaired': 2,
+                                                           'dropped': 1, 'kept': 69}}
+
+
+# ---- fewer duplicate quote calls ----------------------------------------------------------------------------------------------
+
+def test_choosing_candidates_uses_the_quotes_the_poll_just_fetched(desk):
+    desk.refresh()
+    desk.provider.quote_calls.clear()
+    run_cycle(desk)                                            # quiet daily bars: the gate skips, so no order quote either
+    assert desk.provider.quote_calls == []
+    with desk.store.edit() as s:
+        for quote in s['quotes'].values():
+            quote['received'] -= 20                            # older than the poll normally leaves them
+    run_cycle(desk)
+    assert sorted(set(desk.provider.quote_calls)) == ['000660', '005930', 'AAPL', 'MSFT']
+
+
+def test_a_polled_quote_must_still_be_valid(desk):
+    desk.refresh()
+    with desk.store.edit() as s:
+        s['quotes']['005930']['tradable'] = False
+    with pytest.raises(ValueError):
+        desk.polled_quote(desk.store.read(), '005930')
+
+
+def test_exits_do_not_ask_toss_about_a_closed_market(desk):
+    open_position(desk, '005930', price=100000.0)
+    desk.provider.closed.add('005930')
+    desk.refresh()
+    desk.provider.quote_calls.clear()
+    desk.process_desk_exits()
+    assert '005930' not in desk.provider.quote_calls
+    desk.provider.closed.discard('005930')
+    desk.refresh()
+    desk.provider.quote_calls.clear()
+    desk.provider.prices['005930'] = 94000.0                   # open again and below the stop: sold on a fresh quote
+    desk.process_desk_exits()
+    assert desk.provider.quote_calls == ['005930'] and desk.store.read()['trades'][-1]['exit_reason'] == '손절 조건'

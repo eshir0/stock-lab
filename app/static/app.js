@@ -169,7 +169,7 @@ $('experiment-open').onclick = () => {
   $('seed-krw').value = '10000000';
   $('seed-usd').value = '10000';
   $('strategy-mode').value = 'intraday';
-  $('include-leveraged-etfs').checked = true;
+  $('include-leveraged-etfs').checked = false;
   $('universe-mode').value = 'daily_focus';
   $('risk-per-trade').value = '0.5';
   $('daily-loss-limit').value = '2';
@@ -364,7 +364,8 @@ function render() {
   }).join('') || '<tr><td colspan="7" class="empty-cell">아직 보유한 종목이 없습니다.</td></tr>');
   setHtml('events', s.events.slice(-15).reverse().map(e => `<div class="event ${e.level === 'warning' ? 'warning' : ''}"><time>${clock(e.time)}</time><p>${esc(e.message)}</p></div>`).join(''));
   setHtml('trades', s.trades.slice().reverse().map(t => `<tr><td>${dateTime(t.time)}</td><td>${esc(s.instruments.find(i => i.symbol === t.symbol)?.name || t.symbol)}</td><td>${t.side === 'BUY' ? '매수' : '매도'}</td><td>${t.liquidation || t.execution_mode === 'liquidation' ? '전량매도' : t.entry_watch ? (t.execution_mode === 'auto' ? '조건 진입' : '조건 진입 · 승인') : t.execution_mode === 'auto' ? '자동' : '직접 승인'}</td><td>${t.quantity}주</td><td>${number(t.price,t.currency)}</td><td>${number(t.fee,t.currency)}</td><td class="${t.realized >= 0 ? 'gain' : 'loss'}">${t.side === 'SELL' ? number(t.realized,t.currency) : '—'}</td><td>${esc(t.exit_reason ? exitNames[t.exit_reason] || t.exit_reason : '—')}</td></tr>`).join('') || '<tr><td colspan="9" class="empty-cell">모의매매가 체결되면 이곳에 기록됩니다.</td></tr>');
-  $('cost-note').textContent = `비용은 실제 요율 기준입니다: 수수료 국내 ${s.config.fee_kr_bps}bp · 미국 ${s.config.fee_us_bps}bp(주문 10달러 이하 무료), 국내 주식 매도 거래세 ${s.config.sell_tax_kr_bps}bp(ETF 면제), 슬리피지 가정 ${s.config.slippage_bps}bp. 1bp = 0.01%. 익절은 목표가에 지정가로, 손절은 그때의 호가로 체결합니다. 자동 환전은 하지 않습니다.` + (s.config.min_take_cost_ratio > 0 ? ` 익절 폭이 왕복 비용(수수료·슬리피지·세금·스프레드)의 ${s.config.min_take_cost_ratio}배 미만인 매수는 서버가 거부합니다.` : '');
+  const rh = s.config.regular_hours;
+  $('cost-note').textContent = (rh ? `매수·매도는 정규장에서만 합니다: ${rh.KR.label} ${rh.KR.kst}(종가 동시호가 제외) · ${rh.US.label} ${rh.US.kst}(한국 시간, 프리마켓·애프터마켓 제외). ` : '') + `비용은 실제 요율 기준입니다: 수수료 국내 ${s.config.fee_kr_bps}bp · 미국 ${s.config.fee_us_bps}bp(주문 10달러 이하 무료), 국내 주식 매도 거래세 ${s.config.sell_tax_kr_bps}bp(ETF 면제), 슬리피지 가정 ${s.config.slippage_bps}bp. 1bp = 0.01%. 익절은 목표가에 지정가로, 손절은 그때의 호가로 체결합니다. 자동 환전은 하지 않습니다.` + (s.config.min_take_cost_ratio > 0 ? ` 익절 폭이 왕복 비용(수수료·슬리피지·세금·스프레드)의 ${s.config.min_take_cost_ratio}배 미만인 매수는 서버가 거부합니다.` : '');
   drawChart();
   drawSpark('spark-kr', 'KRW');
   drawSpark('spark-us', 'USD');
@@ -461,11 +462,15 @@ function renderIntel(s) {
 }
 const gateReasons = {signal:'규칙 신호', requested:'직접 요청', no_signal:'신호 없음', recent:'최근 분석함', no_data:'일봉 부족'};
 function renderGate(s) {
-  const g = s.desk_gate || {}, month = s.strategy_mode === 'intraday' && s.strategy_settings?.horizon === 'month', show = month && !!g.time;
+  const g = s.desk_gate || {}, scan = s.desk_scan || {}, month = s.strategy_mode === 'intraday' && s.strategy_settings?.horizon === 'month', show = month && !!(g.time || scan.time);
   $('gate-status').hidden = !show;
   if (!show) return;
-  const list = (g.checked || []).map(c => `${c.name} ${gateReasons[c.reason] || c.reason}${c.rules?.length && c.reason !== 'no_signal' ? '(' + c.rules.map(r => ruleNames[r] || r).join('·') + ')' : ''}`).join(' · ');
-  $('gate-status').textContent = `규칙 신호 확인 ${clock(g.time)} · ${list || '확인한 종목 없음'} · AI 호출을 건너뛴 사이클 ${g.skipped_cycles || 0}회`;
+  const nameOf = symbol => s.instruments.find(i => i.symbol === symbol)?.name || symbol;
+  const list = (g.checked || []).map(c => `${c.name} ${gateReasons[c.reason] || c.reason}${c.detail ? '(' + c.detail + ')' : c.rules?.length && c.reason !== 'no_signal' ? '(' + c.rules.map(r => ruleNames[r] || r).join('·') + ')' : ''}`).join(' · ');
+  const skipped = Object.entries(scan.skipped || {}).map(([symbol, why]) => `${nameOf(symbol)}(${why})`).join(' · ');
+  const repairs = Object.entries(scan.repairs || {}).map(([key, n]) => `${nameOf(key.split(':')[0])} ${key.endsWith(':1d') ? '일봉' : '분봉'} ${n.repaired}개 보정${n.dropped ? '·' + n.dropped + '개 제외' : ''}`).join(' · ');
+  $('gate-status').textContent = (g.time ? `규칙 신호 확인 ${clock(g.time)} · ${list || '확인한 종목 없음'} · AI 호출을 건너뛴 사이클 ${g.skipped_cycles || 0}회` : '규칙 신호 확인 전')
+    + (skipped ? ` · 분석 후보에서 빠진 종목(${clock(scan.time)}): ${skipped}` : '') + (repairs ? ` · 캔들 데이터 보정: ${repairs}` : '');
 }
 const kindLabels = {stock: '', etf: 'ETF', lev: '레버리지·인버스'};
 function focusPick(p, held, profile) {
@@ -604,7 +609,15 @@ function renderVerification(s) {
     + `<p class="small muted verify-index">같은 기간 지수 ETF를 그냥 들고 있었다면: ${index || '지수 일봉을 읽는 중입니다'}</p>`
     + (a && a.count ? `<p class="small muted verify-index">AI 판단 vs 규칙대로(5거래일 뒤, ${a.count}건): AI ${pct(a.ai_avg_net_pct)} · 규칙대로 ${pct(a.rule_avg_net_pct)} · 차이 ${pct(a.diff_avg_pct)}${a.diff_ci_pct ? ` (95% ${pct(a.diff_ci_pct[0])} ~ ${pct(a.diff_ci_pct[1])})` : ''}</p>` : '')
     + `<h3 class="verify-sub">거래 성적표 <small class="muted">청산 ${r.closed || 0}건 · 보유 중 ${r.open || 0}건</small></h3>${stats}`
-    + (rows ? `<div class="table-wrap"><table class="eval-table"><thead><tr><th>구분</th><th>거래</th><th>승률</th><th>거래당 기대값</th><th>95% 구간</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''));
+    + (rows ? `<div class="table-wrap"><table class="eval-table"><thead><tr><th>구분</th><th>거래</th><th>승률</th><th>거래당 기대값</th><th>95% 구간</th></tr></thead><tbody>${rows}</tbody></table></div>` : '')
+    + afterExitHtml(s.after_exit, pct));
+}
+function afterExitHtml(x, pct) {
+  const head = '<h3 class="verify-sub">판 뒤의 흐름 <small class="muted">참고 지표 · 매매 규칙은 바꾸지 않습니다</small></h3>';
+  if (!x || !x.tracked) return head + '<p class="small muted verify-index">청산 규칙으로 판 거래를 20거래일 동안 따라가며, 그대로 들고 추적 손절로 나왔다면(C)과 목표가 익절(지금 방식, A)을 비교합니다. 아직 청산된 거래가 없습니다.</p>';
+  const rows = x.rows.map(r => `<tr><td>${esc(r.label)}</td><td>${r.exits}</td><td>${pct(r.d5_avg_pct)}</td><td>${pct(r.d20_avg_pct)}</td><td>${r.replayed ? `${pct(r.c_minus_a_avg_pct)} <small>(${r.c_better}/${r.replayed}건 C 우세)</small>` : (r.takes ? '계산 중' : '—')}</td></tr>`).join('');
+  return head + `<p class="small muted verify-index">추적 ${x.tracked}건 · 계산 중 ${x.waiting}건. 판 가격 대비 5·20거래일 뒤 종가, 익절 거래는 "계속 들고 같은 추적 손절로 나왔다면" 더 번(+) 또는 덜 번(−) 비율.</p>`
+    + `<div class="table-wrap"><table class="eval-table"><thead><tr><th>매수 신호</th><th>청산</th><th>5일 뒤</th><th>20일 뒤</th><th>C − A (익절)</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 function renderEvaluation(s) {
   const ev = s.evaluation, list = s.evaluations || [];

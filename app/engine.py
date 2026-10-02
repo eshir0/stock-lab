@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from .agents import Agents, DESK_ROLES, market_context
 from .desk import DESK_CALLS
-from . import entry
+from . import afterexit, entry, hours
 from .evaluation import score_days, summarize, symbols_due, update_outcomes
 from .live.shadow import shadow_summary
 from .intel import FLOW_DAYS, FLOW_TTL, MarketIntel, RANK_KINDS, RANK_RETRY, RANK_TTL, parse_investor_trading, parse_rankings
@@ -54,6 +54,7 @@ class Engine(DeskMixin, FocusMixin):
         self.benchmark_at = 0
         self.checked_at = 0
         self.notifier = Notifier(config.notify_url)
+        self.hours_lock = config.mode != 'demo'   # fixed regular hours per market (app/hours.py); demo quotes have no session
         self.signal_gate = config.mode != 'demo'   # demo answers are scripted, so there is nothing to conserve
         self.active_provider = None
         self.provider = provider or (DemoProvider() if config.mode == 'demo' else TossProvider(config))
@@ -244,7 +245,8 @@ class Engine(DeskMixin, FocusMixin):
         try:
             if hasattr(self.provider, 'set_universe'):
                 state = self.store.read()
-                symbols = {i['symbol'] for i in self.active_instruments(state)} | set(state['positions'])
+                symbols = ({i['symbol'] for i in self.active_instruments(state)} | set(state['positions'])
+                           | {w['symbol'] for w in entry.waiting(state)})          # a waiting plan needs its price
                 self.provider.set_universe(sorted(symbols))
             quotes = self.provider.quotes()
             with self.store.edit() as s:
@@ -272,7 +274,8 @@ class Engine(DeskMixin, FocusMixin):
         if now-self.days_scored_at < 900:
             return
         self.days_scored_at = now
-        needed = symbols_due(self.store.read().get('evaluations', []), now)
+        snapshot = self.store.read()
+        needed = symbols_due(snapshot.get('evaluations', []), now) | afterexit.due(snapshot)
         bars = {}
         for symbol in sorted(needed):
             try:
@@ -282,6 +285,7 @@ class Engine(DeskMixin, FocusMixin):
         if bars:
             with self.store.edit() as s:
                 score_days(s, now, bars)
+                afterexit.update(s, bars, now)
 
     def refresh_benchmark(self, now=None):
         """Daily closes of the index ETFs the experiment is compared with (scorecard.BENCHMARKS), read at most every 15 minutes
@@ -413,6 +417,9 @@ class Engine(DeskMixin, FocusMixin):
         if not q.get('tradable'):
             raise RuleError('정규장 또는 유효한 호가를 기다리고 있습니다.')
         now = time.time()
+        market = SYMBOLS[symbol]['market']
+        if self.hours_lock and not hours.regular_open(market, now):
+            raise RuleError(hours.refusal(market, now))
         if not q.get('session_start', 0) <= now < q.get('session_end', 0):
             raise RuleError('거래 가능 시간이 종료되었습니다. 다음 정규장을 기다립니다.')
         for key in ('asof', 'book_asof', 'received'):
@@ -429,6 +436,18 @@ class Engine(DeskMixin, FocusMixin):
         q = self.provider.quote(symbol)
         self.validate_quote(q, symbol)
         return q
+
+    POLLED_AGE = 15     # seconds a quote from the 10-second poll is good enough for choosing what to look at
+
+    def polled_quote(self, state, symbol):
+        """The quote the poll fetched moments ago when it is fresh and tradable, else a new one. Choosing candidates from the
+        polled quotes keeps the desk from asking Toss again for what it already has: those duplicate calls landing on the
+        poll's burst were what pushed the market-data group over its limit. Orders still use `quote_for_trade`."""
+        q = (state.get('quotes') or {}).get(symbol)
+        if q and time.time()-q.get('received', 0) <= self.POLLED_AGE:
+            self.validate_quote(q, symbol)
+            return q
+        return self.quote_for_trade(symbol)
 
     def fill(self, s, symbol, side, qty, q, ref, liquidation=False, limit=None):
         self.validate_quote(q, symbol)
@@ -602,11 +621,13 @@ class Engine(DeskMixin, FocusMixin):
                 s['liquidating'] = False
                 event(s, '전량 모의매도가 완료되었습니다. 중지 상태입니다.')
 
-    def wait_for_cycle(self, generation, message, next_run=None):
+    def wait_for_cycle(self, generation, message, next_run=None, scan=None):
         with self.store.edit() as s:
             if s['running'] and s['generation'] == generation:
                 s['scheduler_status'] = message
                 s['next_run'] = next_run if next_run is not None else time.time()+30
+                if scan is not None:
+                    s['desk_scan'] = scan
 
     def begin_ai_cycle(self, gen):
         """Choose this cycle's AI providers BEFORE anything is spent: skip the ones that are exhausted or past the
@@ -795,6 +816,8 @@ class Engine(DeskMixin, FocusMixin):
         s['evaluation'] = summarize(evaluations)
         card = scorecard.report(s['trades'])                         # every trade, before the list is cut for the page
         s['scorecard'] = card
+        s['after_exit'] = afterexit.summary(s)
+        s.pop('after_exits', None)
         s['verification'] = verification.judge(s, tracking=tracking, report=card, evaluation=s['evaluation'], config=self.c,
                                                now=time.time())
         s['evaluations'] = [{k: v for k, v in e.items() if k != 'candidates'} for e in evaluations[-30:]]
@@ -811,7 +834,7 @@ class Engine(DeskMixin, FocusMixin):
                        'poll': self.c.poll_seconds, 'interval': self.interval_plan(s)[0], 'interval_active': self.interval_plan(s)[1],
                        'conditional_entry': self.c.conditional_entry, 'min_take_cost_ratio': self.c.min_take_cost_ratio,
                        'ai_light_roles': list(self.c.ai_light_roles), 'models': {'main': self.c.claude_model, 'light': self.c.claude_model_light},
-                       'fee_kr_bps': self.c.fee_kr, 'fee_us_bps': self.c.fee_us,
+                       'regular_hours': hours.summary(time.time()), 'fee_kr_bps': self.c.fee_kr, 'fee_us_bps': self.c.fee_us,
                        'sell_tax_kr_bps': self.c.sell_tax_kr, 'slippage_bps': self.c.slippage_bps,
                        'roles': [{'id': role, 'name': name} for role, name in (DESK_ROLES if s.get('strategy_mode') == 'intraday' else ROLES)],
                        'analysis_calls_per_cycle': DESK_CALLS if s.get('strategy_mode') == 'intraday' else len(ROLES)}

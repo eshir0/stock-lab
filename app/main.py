@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -25,6 +26,9 @@ from .search_display import SEARCH_ENTRY_HEADER, register_search_display
 from .store import Store
 
 STATIC = Path(__file__).parent/'static'
+
+
+SESSION_SECONDS = 28800             # eight hours
 
 
 def create_app(config=None, background=True, test=False):
@@ -151,6 +155,24 @@ def create_app(config=None, background=True, test=False):
     gate_log = logging.getLogger('uvicorn.error')
     gate_seen = {}
 
+    # Tunnels allowed to say who connected (Cloudflare's CF-Connecting-IP). Every other peer is counted as itself.
+    trusted_proxies = {ip.strip() for ip in os.getenv('TRUSTED_PROXY_IPS', '').split(',') if ip.strip()}
+
+    def client_ip(request):
+        """The address the login throttle counts. Behind a trusted tunnel every visitor arrives from the tunnel's address, so
+        one bucket would let a stranger's failed guesses lock the owner out too; the tunnel's CF-Connecting-IP is used
+        instead. Any other peer cannot claim an address."""
+        peer = request.client.host if request.client else '-'
+        if peer in trusted_proxies:
+            try:
+                return str(ipaddress.ip_address(request.headers.get('cf-connecting-ip', '').strip()))
+            except ValueError:
+                pass
+        return peer
+
+    # Tokens are stateless; logging out moves this line, so every token issued before it stops working (one owner, one key).
+    auth = {'revoked_before': float((store.read().get('auth') or {}).get('revoked_before', 0))}
+
     def note_rejection(request, reason):
         """Say why a write was refused, once per distinct cause every five minutes. Headers only: no body, no cookies."""
         now = time.time()
@@ -160,8 +182,8 @@ def create_app(config=None, background=True, test=False):
         if len(gate_seen) > 200:
             gate_seen.clear()
         gate_seen[key] = now
-        gate_log.warning('write refused (%s) %s %s host=%r origin=%r peer=%s', reason, request.method, request.url.path,
-                         key[1], key[2], request.client.host if request.client else '-')
+        gate_log.warning('write refused (%s) %s %s host=%r origin=%r peer=%s client=%s', reason, request.method, request.url.path,
+                         key[1], key[2], request.client.host if request.client else '-', client_ip(request))
 
     def signed(value):
         digest = hmac.new(c.session_secret.encode(), value.encode(), hashlib.sha256).hexdigest()
@@ -171,9 +193,15 @@ def create_app(config=None, background=True, test=False):
         cookie = request.cookies.get('stocklab_session', '')
         try:
             value, sig = cookie.rsplit('.', 1)
-            return hmac.compare_digest(signed(value), cookie) and float(value.split(':')[0]) > time.time()
+            parts = value.split(':')
+            expires = float(parts[0])
+            issued = float(parts[1]) if len(parts) == 3 else expires-SESSION_SECONDS     # tokens from before revocation existed
+            return hmac.compare_digest(signed(value), cookie) and expires > time.time() and issued > auth['revoked_before']
         except (ValueError, TypeError):
             return False
+
+    def refused(detail, status):
+        return secure(JSONResponse({'detail': detail}, status_code=status))
 
     @app.middleware('http')
     async def access(request: Request, call_next):
@@ -181,13 +209,16 @@ def create_app(config=None, background=True, test=False):
             if request.method != 'GET':
                 if request.headers.get('x-stocklab-action') != '1':
                     note_rejection(request, 'missing-action-header')
-                    return JSONResponse({'detail': '허용되지 않은 요청입니다.'}, status_code=403)
+                    return refused('허용되지 않은 요청입니다.', 403)
                 if not origin_ok(request):
                     note_rejection(request, 'origin-mismatch')
-                    return JSONResponse({'detail': '허용되지 않은 요청입니다.'}, status_code=403)
+                    return refused('허용되지 않은 요청입니다.', 403)
             if request.url.path != '/api/login' and not authenticated(request):
-                return JSONResponse({'detail': '로그인이 필요합니다.'}, status_code=401)
-        response = await call_next(request)
+                return refused('로그인이 필요합니다.', 401)
+        return secure(await call_next(request))
+
+    def secure(response):
+        """The same security headers on every response, the gate's own refusals included."""
         search_entry = response.headers.get(SEARCH_ENTRY_HEADER) == '1'
         if SEARCH_ENTRY_HEADER in response.headers:
             del response.headers[SEARCH_ENTRY_HEADER]
@@ -213,7 +244,7 @@ def create_app(config=None, background=True, test=False):
 
     @app.post('/api/login')
     async def login(data: Login, request: Request, response: Response):
-        remote = request.client.host
+        remote = client_ip(request)
         attempts = failures.get(remote, [])
         attempts = [t for t in attempts if t > time.time()-300]
         if len(attempts) >= 10:
@@ -224,13 +255,19 @@ def create_app(config=None, background=True, test=False):
             failures[remote] = attempts+[time.time()]
             raise HTTPException(401, '비밀번호가 올바르지 않습니다.')
         failures.pop(remote, None)
-        token = signed(str(int(time.time()+28800))+':'+secrets.token_urlsafe(24))
+        now = time.time()
+        token = signed(f'{int(now+SESSION_SECONDS)}:{now:.3f}:{secrets.token_urlsafe(24)}')
         response.set_cookie('stocklab_session', token, httponly=True, samesite='strict',
-                            secure=browser_origin(request).startswith('https://') or on_public_origin(request), max_age=28800)
+                            secure=browser_origin(request).startswith('https://') or on_public_origin(request),
+                            max_age=SESSION_SECONDS)
         return {'ok': True}
 
     @app.post('/api/logout')
-    async def logout(response: Response):
+    def logout(response: Response):
+        # Every session ends, not just this browser's cookie: a copied token stops working too.
+        auth['revoked_before'] = time.time()
+        with store.edit() as s:
+            s['auth'] = {'revoked_before': auth['revoked_before']}
         response.delete_cookie('stocklab_session')
         return {'ok': True}
 
@@ -279,7 +316,7 @@ def create_app(config=None, background=True, test=False):
         max_order_pct: float = Field(default=30, ge=1, le=100, allow_inf_nan=False, strict=True)
         max_position_pct: float | None = Field(default=None, ge=10, le=100, allow_inf_nan=False, strict=True)
         strategy_mode: Literal['legacy', 'intraday'] = 'legacy'
-        include_leveraged_etfs: bool = Field(default=True, strict=True)
+        include_leveraged_etfs: bool = Field(default=False, strict=True)
         universe_mode: Literal['daily_focus', 'fixed'] = 'daily_focus'
         horizon: Literal['month', 'intraday'] = 'month'
         risk_per_trade_pct: float = Field(default=.5, ge=.1, le=2, allow_inf_nan=False, strict=True)

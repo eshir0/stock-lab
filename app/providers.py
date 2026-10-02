@@ -59,6 +59,38 @@ def positive(value):
     return f
 
 
+REPAIR_PCT = .5       # % of the close a bar's high/low may miss its own open/close by and still be put back in range
+MAX_DROPPED = .1      # share of broken bars above which a whole candle series is refused
+
+
+def candle_row(item, currency, interval, now):
+    """One Toss candle as a row (None when it lies in the future or has no time), or ValueError for a broken bar. Adjusted
+    prices are rounded one by one after a dividend or a split, so a bar's high or low can come back a tick outside its own
+    open/close: a slip of up to REPAIR_PCT is put back in range and the row is marked `repaired`; a larger one is broken."""
+    asof = timestamp(item['timestamp'])
+    if not asof or asof > now+5:
+        return None
+    volume = float(item['volume'])
+    if not math.isfinite(volume) or volume < 0:
+        raise ValueError('invalid volume')
+    close = positive(item['closePrice'])
+    row = {'time': asof, 'close': close, 'volume': volume, 'currency': currency,
+           'interval': interval, 'completed': asof+(60 if interval == '1m' else 86400) <= now}
+    for name in ('open', 'high', 'low'):
+        if item.get(name+'Price') is not None:
+            row[name] = positive(item[name+'Price'])
+    if interval == '1m' and not all(key in row for key in ('open', 'high', 'low')):
+        raise ValueError('minute OHLC missing')
+    if all(key in row for key in ('open', 'high', 'low')):
+        top, bottom = max(row['open'], close), min(row['open'], close)
+        slip = max(row['low']-bottom, top-row['high'], 0.0)
+        if slip > close*REPAIR_PCT/100:
+            raise ValueError('invalid candle range')
+        if slip > 0:
+            row.update(low=min(row['low'], bottom), high=max(row['high'], top), repaired=True)
+    return row
+
+
 class DemoProvider:
     """Deliberately synthetic. Every response and ledger is namespaced demo."""
     def set_universe(self, symbols):
@@ -110,6 +142,7 @@ class TossProvider:
         self.calendar = {}
         self.parallel = max(1, min(8, int(getattr(config, 'toss_parallel', 4) or 1)))
         self.cooldowns = {}     # group -> time until which its calls pause
+        self.candle_notes = {}  # 'symbol:interval' -> {time, repaired, dropped, kept} of the latest candle read
         self.rates = {}         # group -> last advertised {limit, remaining, at}
 
     def access_token(self):
@@ -277,31 +310,27 @@ class TossProvider:
         size = max(1, min(200, int(count))) if count else (120 if interval == '1m' else 60)
         data = self.get('/api/v1/candles', {'symbol': symbol, 'interval': interval,
                                          'count': size, 'adjusted': 'true'})
-        now, rows, seen = time.time(), [], set()
+        now, rows, seen, repaired, dropped = time.time(), [], set(), 0, 0
         try:
             for item in data['candles']:
-                asof = timestamp(item['timestamp'])
-                if not asof or asof > now+5 or asof in seen:
+                if not isinstance(item, dict):
+                    dropped += 1
                     continue
-                currency = item.get('currency', SYMBOLS[symbol]['currency'])
-                if currency != SYMBOLS[symbol]['currency']:
-                    raise ValueError('candle currency mismatch')
-                volume = float(item['volume'])
-                if not math.isfinite(volume) or volume < 0:
-                    raise ValueError('invalid volume')
-                close = positive(item['closePrice'])
-                row = {'time': asof, 'close': close, 'volume': volume, 'currency': currency,
-                       'interval': interval, 'completed': asof+(60 if interval == '1m' else 86400) <= now}
-                for name in ('open', 'high', 'low'):
-                    if item.get(name+'Price') is not None:
-                        row[name] = positive(item[name+'Price'])
-                if interval == '1m' and not all(key in row for key in ('open', 'high', 'low')):
-                    raise ValueError('minute OHLC missing')
-                if all(key in row for key in ('open', 'high', 'low')):
-                    if row['low'] > min(row['open'], row['close']) or row['high'] < max(row['open'], row['close']):
-                        raise ValueError('invalid candle range')
-                seen.add(asof)
+                if item.get('currency', SYMBOLS[symbol]['currency']) != SYMBOLS[symbol]['currency']:
+                    raise ValueError('candle currency mismatch')      # another instrument's data: refuse the whole series
+                try:
+                    row = candle_row(item, SYMBOLS[symbol]['currency'], interval, now)
+                except (KeyError, TypeError, ValueError, OverflowError, ProviderError):
+                    dropped += 1                                       # one broken bar costs that bar, not the series
+                    continue
+                if row is None or row['time'] in seen:
+                    continue
+                repaired += row.pop('repaired', False)
+                seen.add(row['time'])
                 rows.append(row)
         except (KeyError, TypeError, ValueError, OverflowError):
             raise ProviderError('캔들 데이터의 시각·통화·가격을 검증하지 못했습니다.') from None
+        self.candle_notes[f'{symbol}:{interval}'] = {'time': now, 'repaired': repaired, 'dropped': dropped, 'kept': len(rows)}
+        if dropped > max(2, MAX_DROPPED*(dropped+len(rows))):
+            raise ProviderError(f'캔들 데이터에 비정상 봉이 너무 많습니다({dropped}/{dropped+len(rows)}).')
         return sorted(rows, key=lambda row: row['time'])

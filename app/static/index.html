@@ -108,7 +108,7 @@
 <fieldset id="intraday-settings" class="strategy-fields"><legend>매매 기간과 위험 기준</legend>
 <label class="field-label" for="horizon">투자 기간</label><select id="horizon" name="horizon"><option value="month">1개월 스윙 · 최대 30일 보유, 밤새 보유</option></select>
 <p id="horizon-description" class="muted small"></p>
-<label class="checkbox-label" for="include-leveraged-etfs"><input id="include-leveraged-etfs" name="include_leveraged_etfs" type="checkbox" checked><span>레버리지·인버스 ETF를 관심종목에 포함</span></label>
+<label class="checkbox-label" for="include-leveraged-etfs"><input id="include-leveraged-etfs" name="include_leveraged_etfs" type="checkbox"><span>레버리지·인버스 ETF를 관심종목에 포함</span></label>
 <p class="muted small">ETF 자체의 시세로 모의매매합니다. 계좌에서 돈을 빌리거나 주식을 공매도하지 않습니다.</p>
 <label class="field-label" for="universe-mode">종목 구성 방식</label><select id="universe-mode" name="universe_mode"><option value="daily_focus">일일 집중 종목 (권장) · 매일 아침 데이터와 뉴스로 시장별 선정 (상승 추세 종목 위주)</option><option value="fixed">고정 종목 · 삼성전자·SK하이닉스·Apple·Microsoft와 레버리지 ETF</option></select>
 <p class="muted small">일일 집중 종목은 개장 90분 전에 계산하고 그날 목록 밖의 종목은 신규 매수하지 않습니다. 계산에 실패하면 고정 종목으로 진행합니다. 이미 보유한 종목은 추세가 유지되면 그대로 두고, 꺾이면 개장 후 매도합니다.</p>

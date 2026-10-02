@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from . import entry, gate, history, pacing, reuse
+from . import afterexit, entry, gate, history, pacing, reuse
 from .agents import DESK_ROLES, STOPPED, market_context
 from .config import INSTRUMENTS as BASE_INSTRUMENTS
 from .instruments import INSTRUMENTS, SYMBOLS
@@ -140,10 +140,11 @@ class DeskMixin:
             name = SYMBOLS[symbol]['name']
             held = bool((snapshot['positions'].get(symbol) or {}).get('quantity'))
             forced = symbol == requested or not enforce
+            problem = ''
             try:
                 rows = self.daily_bars(symbol, now)
-            except (ProviderError, KeyError, ValueError):
-                rows = None
+            except (ProviderError, KeyError, ValueError) as exc:
+                rows, problem = None, str(exc)[:120] or type(exc).__name__
             signal = {}
             if rows is not None:
                 bars[symbol] = rows
@@ -153,10 +154,11 @@ class DeskMixin:
                                       price=mid(quote), now=now, forced=forced)
             else:
                 verdict = {'eligible': forced, 'reason': 'requested' if symbol == requested else 'no_data', 'rules': []}
+                problem = problem or f'완료된 일봉 {len(rows or [])}개 (필요 {history.MIN_BARS}개)'
             verdicts[symbol] = dict(verdict, signals=signal, held=held)
             checks.append({'symbol': symbol, 'name': name, 'held': held, 'eligible': verdict['eligible'],
                            'reason': verdict['reason'], 'rules': verdict['rules'],
-                           'signals': {k: v for k, v in signal.items() if v}})
+                           'signals': {k: v for k, v in signal.items() if v}, **({'detail': problem} if problem else {})})
             if verdict['eligible']:
                 eligible.append(cand)
         skipped = not eligible
@@ -289,6 +291,8 @@ class DeskMixin:
         if proposal.get('reused'):
             trade['reused'] = True
         if proposal['side'] != 'BUY':
+            if proposal.get('exit_reason') and symbol not in state['positions']:
+                afterexit.record(state, symbol, proposal.get('position'), trade, proposal['exit_reason'])
             return
         pos = state['positions'][symbol]
         horizon = horizon_of(state.get('strategy_settings'))
@@ -337,6 +341,9 @@ class DeskMixin:
             return
         gen = snapshot['generation']
         for symbol in list(snapshot['positions']):
+            seen = snapshot['quotes'].get(symbol) or {}
+            if seen and not seen.get('tradable') and time.time()-seen.get('received', 0) < self.c.quote_age:
+                continue                     # the poll just saw this market closed: nothing can be sold, so no Toss call
             try:
                 q = self.quote_for_trade(symbol)
                 with self.store.edit() as s:
@@ -382,7 +389,9 @@ class DeskMixin:
                                 'generation': gen, 'revision': s['revision'], 'mode': self.c.mode,
                                 'status': 'pending', 'strategy_mode': 'intraday', 'exit_reason': reason,
                                 'summary': reason+'에 따른 모의매도', 'risks': ['지정한 손절 가격은 체결 가격을 보장하지 않습니다.'],
-                                'sizing': {'quantity': qty, 'reason': reason}}
+                                'sizing': {'quantity': qty, 'reason': reason},
+                                'position': {k: pos.get(k) for k in ('average', 'stop_price', 'trail_pct', 'high_water',
+                                                                     'expires_at')}}
                     for other in s['proposals']:
                         if other['status'] == 'pending' and other['symbol'] == symbol:
                             other['status'] = 'invalidated'
@@ -530,6 +539,11 @@ class DeskMixin:
             entry.close(watch, 'expired', '유효 시간 안에 조건이 충족되지 않았습니다.', now)
             event(s, f'{name} 조건 진입 기한이 지나 폐기합니다. 조건이 충족되지 않았습니다.')
             return False
+        if not self.focus_allows(s, symbol):
+            # Checked before the quote: a name that left the list is no longer quoted, and would otherwise wait unseen.
+            entry.close(watch, 'cancelled', '오늘의 집중 종목에서 빠져 취소했습니다.', now)
+            event(s, f'{name} 조건 진입을 취소했습니다. 오늘의 집중 종목이 아닙니다.')
+            return False
         quote = s['quotes'].get(symbol)
         try:
             self.validate_quote(quote or {}, symbol)
@@ -537,10 +551,6 @@ class DeskMixin:
             return False                                   # closed market or no fresh book: nothing is judged now
         if quote['received'] <= watch['last_received']:
             return False                                   # nothing new since the last look
-        if not self.focus_allows(s, symbol):
-            entry.close(watch, 'cancelled', '오늘의 집중 종목에서 빠져 취소했습니다.', now)
-            event(s, f'{name} 조건 진입을 취소했습니다. 오늘의 집중 종목이 아닙니다.')
-            return False
         watch['last_received'], watch['last_price'], watch['checked'] = quote['received'], mid(quote), now
         verdict = entry.evaluate(watch, quote)
         if verdict == 'invalid':
@@ -647,7 +657,7 @@ class DeskMixin:
                                 (int(now)//86400+1)*86400+1)
             return
         symbols = [i['symbol'] for i in self.active_instruments(snapshot)]
-        candidates, message = [], '정규장·최신 호가·거래 가능한 수량을 기다립니다.'
+        candidates, message, skipped = [], '정규장·최신 호가·거래 가능한 수량을 기다립니다.', {}
         watching = {w['symbol'] for w in entry.waiting(snapshot)}
         for offset in range(len(symbols)):
             index = (snapshot['cursor']+offset) % len(symbols)
@@ -656,6 +666,7 @@ class DeskMixin:
                 continue
             if symbol in watching and symbol != snapshot.get('requested_symbol'):
                 message = '조건 진입을 기다리는 종목은 그 조건이 끝날 때까지 다시 분석하지 않습니다.'
+                skipped[symbol] = '조건 진입 대기 중'
                 continue
             if not self.current(gen):
                 return
@@ -663,22 +674,31 @@ class DeskMixin:
             if seen and not seen.get('tradable') and now-seen.get('received', 0) < self.c.quote_age:
                 continue                     # the quote poll just saw this market closed: no need to ask Toss again
             try:
-                q = self.quote_for_trade(symbol)
+                q = self.polled_quote(snapshot, symbol)
                 limits = self.order_constraints(snapshot, symbol, q)
                 if SYMBOLS[symbol]['currency'] in snapshot.get('risk_status', {}).get('halted_currencies', []):
+                    skipped[symbol] = '일일 손실 한도'
                     continue
                 if q['session_end']-now < 300 or not (limits['max_buy_quantity'] or limits['max_sell_quantity']):
+                    skipped[symbol] = '장 마감 직전' if q['session_end']-now < 300 else '살 수 있는 수량 없음'
                     continue
                 candles, problem = self.usable_candles(self.provider.candles(symbol, interval='1m'), q, now)
                 if problem:
-                    message = problem
+                    message = skipped[symbol] = problem
                     continue
                 candidates.append((symbol, index, q, candles, limits))
             except (ValueError, ProviderError, KeyError) as exc:
-                message = str(exc)
+                message = skipped[symbol] = str(exc)[:120] or type(exc).__name__
+        # Why each name was left out of this round, and any candle data the provider had to repair: shown on the dashboard.
+        notes = getattr(self.provider, 'candle_notes', {})
+        scan = {'time': now, 'skipped': skipped,
+                'repairs': {key: dict(n) for key, n in notes.items() if (n['repaired'] or n['dropped']) and now-n['time'] < 3600}}
         if not candidates:
-            self.wait_for_cycle(gen, message)
+            self.wait_for_cycle(gen, message, scan=scan)
             return
+        with self.store.edit() as s:
+            if s['running'] and s['generation'] == gen:
+                s['desk_scan'] = scan
         month = horizon_of(snapshot.get('strategy_settings')) == 'month'
         verdicts, bars = {}, {}
         if month:

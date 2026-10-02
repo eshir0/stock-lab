@@ -536,6 +536,7 @@ def test_the_memo_reports_how_the_plan_ended_and_how_far_the_price_moved(day):
     at(day, 69200.0)
     poll(day)                                                  # the plan dies
     at(day, 71400.0)
+    day.refresh()                                              # the poll sees the new price before the next analysis
     analyse(day)
     previous = [c for role, c in day.contexts if role == 'planner'][1]['previous']
     assert previous['entry_plan']['result'] == '무효 가격 이탈' and previous['price_change_pct'] == 2.0

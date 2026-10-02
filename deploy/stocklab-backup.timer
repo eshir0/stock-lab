@@ -1,0 +1,10 @@
+[Unit]
+Description=Stock Lab daily database backup (06:10, after the US close and before the Korean focus list)
+
+[Timer]
+OnCalendar=*-*-* 06:10:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

@@ -9,4 +9,7 @@ case "$host" in ''|127.*|0.0.0.0) ;; *)
   done
   ip -4 -o addr show | grep -q " ${host}/" || { echo "address ${host} never appeared"; exit 1; }
 esac
-exec docker compose up -d --wait --wait-timeout 180
+# Docker's restart policy may start the app before the address exists; that attempt fails and leaves the container
+# without its network (DNS for 'db' fails, restart loop). So the app is always recreated once the address is there.
+docker compose up -d --wait --wait-timeout 180 db || exit 1
+exec docker compose up -d --no-deps --force-recreate --wait --wait-timeout 180 app

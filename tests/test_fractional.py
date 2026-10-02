@@ -331,6 +331,7 @@ def test_the_experiment_form_accepts_a_per_order_limit_up_to_100_and_no_more(tmp
 
 def test_the_desk_buys_a_fraction_of_an_expensive_stock_and_sells_all_of_it_at_the_stop(desk):
     desk.provider.prices['AAPL'] = 733.0
+    desk.refresh()                                     # the poll sees the price first, as it would
     desk.request_cycle('AAPL')
     state = run_cycle(desk)
     trade = state['trades'][-1]
@@ -346,11 +347,13 @@ def test_the_desk_buys_a_fraction_of_an_expensive_stock_and_sells_all_of_it_at_t
 
 def test_fractional_orders_leave_no_shadow_record_and_no_warning_but_whole_ones_still_do(desk):
     desk.provider.prices['AAPL'] = 733.0
+    desk.refresh()                                     # the poll sees the price first, as it would
     desk.request_cycle('AAPL')
     state = run_cycle(desk)
     assert not [r for r in state.get('shadow_orders', []) if r['symbol'] == 'AAPL']
     assert not any('그림자 기록에 실패' in e['message'] for e in state['events'])
     desk.provider.prices['005930'] = 70_000.0
+    desk.refresh()
     desk.request_cycle('005930')
     state = run_cycle(desk)
     assert [r for r in state.get('shadow_orders', []) if r['symbol'] == '005930']
@@ -361,6 +364,7 @@ def test_the_analysts_are_told_the_limits_and_that_us_orders_can_be_fractional(d
     real = desk.agents.run
     desk.agents.run = lambda role, ctx, gen: (seen.append((role, ctx.get('constraints'), ctx.get('strategy_settings'))), real(role, ctx, gen))[1]
     desk.provider.prices['AAPL'] = 733.0
+    desk.refresh()                                     # the poll sees the price first, as it would
     desk.request_cycle('AAPL')
     run_cycle(desk)
     role, constraints, settings = next(x for x in seen if x[0] == 'director')

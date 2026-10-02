@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Daily Stock Lab database backup (systemd stocklab-backup.timer). Keeps 30 days of dumps and deploy-time code archives;
+# the env backups are left alone (small, root-only, and the only record of past settings).
+set -euo pipefail
+/opt/stock-lab/backup.sh
+find /opt/stock-lab/backups -maxdepth 1 -type f \( -name 'stocklab-*.dump' -o -name 'code-before-*.tgz' \) -mtime +30 -delete

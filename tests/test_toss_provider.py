@@ -188,3 +188,59 @@ def test_a_redirect_is_a_failure_like_any_other_non_success_status():
     toss = provider(FakeResponse(302, result=[{'symbol': 'AAPL'}]))
     with pytest.raises(ProviderError, match=r'\[HTTP 302\]'):
         toss.get('/api/v1/prices', {'symbols': 'AAPL'})
+
+
+# ---- candles: a bad bar costs that bar, not the whole series ---------------------------------------------------------------
+
+def candle(day, o, h, l, c, volume=1000, currency='KRW'):
+    when = datetime(2026, 6, 1, tzinfo=ZoneInfo('Asia/Seoul'))+timedelta(days=day)
+    return {'timestamp': when.isoformat(), 'openPrice': o, 'highPrice': h, 'lowPrice': l, 'closePrice': c, 'volume': volume,
+            'currency': currency}
+
+
+def daily(rows):
+    return provider(FakeResponse(result={'candles': rows}))
+
+
+def test_a_rounding_slip_from_price_adjustment_is_put_back_in_range():
+    rows = [candle(i, 100, 102, 99, 101) for i in range(20)]
+    rows[3] = candle(3, 100, 102, 100.3, 101)               # the low 0.3% above the open: adjusted prices rounded one by one
+    rows[4] = candle(4, 100, 100.8, 99, 101)                # the high under the close by 0.2%
+    toss = daily(rows)
+    bars = toss.candles('005930', '1d', 20)
+    assert len(bars) == 20 and (bars[3]['low'], bars[3]['high']) == (100, 102) and (bars[4]['low'], bars[4]['high']) == (99, 101)
+    assert all('repaired' not in b for b in bars) and all(b['completed'] for b in bars)
+    assert toss.candle_notes['005930:1d']['repaired'] == 2 and toss.candle_notes['005930:1d']['dropped'] == 0
+
+
+@pytest.mark.parametrize('broken', [
+    candle(5, 100, 102, 90, 120),                           # the close far above the high: a broken bar
+    candle(5, 100, 102, 99, 101, volume=-5),
+    candle(5, 100, 102, 99, 0),
+    {'openPrice': 100, 'closePrice': 101, 'volume': 1},      # no time
+    'garbage',
+])
+def test_a_broken_bar_is_dropped_and_the_rest_of_the_series_kept(broken):
+    rows = [candle(i, 100, 102, 99, 101) for i in range(20)]
+    rows[5] = broken
+    toss = daily(rows)
+    bars = toss.candles('005930', '1d', 20)
+    assert len(bars) == 19 and toss.candle_notes['005930:1d'] == {**toss.candle_notes['005930:1d'], 'dropped': 1, 'kept': 19}
+
+
+def test_a_minute_bar_without_its_range_is_dropped():
+    rows = [candle(i, 100, 102, 99, 101) for i in range(20)]
+    del rows[2]['highPrice']
+    toss = daily(rows)
+    assert len(toss.candles('005930', '1m', 20)) == 19
+    assert len(daily([candle(i, 100, 102, 99, 101) for i in range(3)]+[dict(candle(9, 100, 102, 99, 101), highPrice=None)]).candles('005930', '1d', 4)) == 4
+
+
+def test_a_mostly_broken_series_or_another_instruments_data_is_refused():
+    rows = [candle(i, 100, 102, 99, 101) for i in range(10)]
+    for i in (1, 3, 5):
+        rows[i] = candle(i, 100, 102, 90, 120)
+    with pytest.raises(ProviderError, match='비정상 봉이 너무 많습니다'):
+        daily(rows).candles('005930', '1d', 10)
+    with pytest.raises(ProviderError):
+        daily([candle(i, 100, 102, 99, 101) for i in range(5)]+[candle(6, 100, 102, 99, 101, currency='USD')]).candles('005930', '1d', 6)

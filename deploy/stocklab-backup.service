@@ -1,0 +1,8 @@
+[Unit]
+Description=Stock Lab daily database backup
+Requires=docker.service
+After=docker.service stocklab.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/stocklab-backup
