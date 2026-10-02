@@ -1,0 +1,10 @@
+[Unit]
+Description=Collect market history every day after the Korean close (US bars of the night before are complete by then)
+
+[Timer]
+OnCalendar=*-*-* 16:40:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

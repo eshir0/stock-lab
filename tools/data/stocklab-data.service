@@ -1,0 +1,20 @@
+[Unit]
+Description=Stock Lab history collector (daily, hourly and minute bars for backtests; Yahoo, never Toss)
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=12h
+ExecStartPre=-/usr/bin/docker rm -f stocklab-data stocklab-sec stocklab-dart
+ExecStart=/usr/bin/docker run --rm --name stocklab-data --memory 2g --cpus 1.5 --read-only --tmpfs /tmp \
+  --cap-drop ALL --security-opt no-new-privileges -e DATA=/data \
+  -v /opt/stocklab-data:/code:ro -v /srv/stocklab-data:/data stocklab-data python collector.py all
+ExecStart=/usr/bin/docker run --rm --name stocklab-sec --memory 4g --cpus 1 --read-only --tmpfs /tmp \
+  --cap-drop ALL --security-opt no-new-privileges -e DATA=/data --env-file /opt/stocklab-data/contact.env \
+  -v /opt/stocklab-data:/code:ro -v /srv/stocklab-data:/data stocklab-data python sec.py
+ExecStart=/usr/bin/docker run --rm --name stocklab-dart --memory 2g --cpus 1 --read-only --tmpfs /tmp \
+  --cap-drop ALL --security-opt no-new-privileges -e DATA=/data --env-file /opt/stocklab-data/contact.env \
+  -v /opt/stocklab-data:/code:ro -v /srv/stocklab-data:/data stocklab-data python dart.py
