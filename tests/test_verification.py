@@ -293,3 +293,29 @@ def test_the_engine_freezes_it_once(tmp_path, monkeypatch):
     engine.lock_verdict(now=NOW+1)
     assert store.read()['verification']['official'] == {'status': 'pass', 'time': NOW, 'strategy_changed': False, 'progress': [], 'checks': []}
     store.release()
+
+
+# ---- the index statistics are cumulative (2026-10-03 review) -------------------------------------------------------------------
+
+from app.scorecard import benchmark_entry as _bench
+
+
+def _bars(points):
+    return [{'time': t, 'close': c} for t, c in points]
+
+
+def test_an_empty_answer_or_a_shorter_window_keeps_the_index_statistics():
+    full = _bench('SPY', _bars([(0, 100), (1, 150), (2, 100), (3, 125)]), 0)
+    assert (full['return_pct'], full['max_drawdown_pct']) == (25.0, 33.333)
+    assert {k: _bench('SPY', [], 0, full)[k] for k in ('return_pct', 'max_drawdown_pct')} == {'return_pct': 25.0, 'max_drawdown_pct': 33.333}
+    later = _bench('SPY', _bars([(3, 125), (4, 140)]), 0, full)                     # the early peak is out of the window
+    assert later['max_drawdown_pct'] == 33.333 and later['return_pct'] == 40.0 and later['peak'] == 150
+    deeper = _bench('SPY', _bars([(4, 140), (5, 90)]), 0, later)
+    assert deeper['max_drawdown_pct'] == 40.0                                         # from the remembered 150
+
+
+def test_an_entry_saved_before_the_peak_was_kept_is_upgraded():
+    old = {'symbol': 'SPY', 'start_time': 0, 'start_close': 100, 'last_time': 3, 'last_close': 125, 'return_pct': 25.0,
+           'max_drawdown_pct': 33.333}
+    up = _bench('SPY', _bars([(1, 150), (2, 100), (3, 125), (4, 160)]), 0, old)
+    assert up['peak'] == 160 and up['max_drawdown_pct'] == 33.333 and up['return_pct'] == 60.0

@@ -151,14 +151,18 @@ def statements(c, corp_df, today):
             rows, batch = [], []
             try:
                 for r in todo:
-                    got = []
+                    got, settled = [], True
                     for fs in ('CFS', 'OFS'):
                         body = c.get('fnlttSinglAcntAll.json', corp_code=r.corp_code, bsns_year=year, reprt_code=report, fs_div=fs)
-                        if body.get('status') == '000':
+                        status = body.get('status')
+                        if status == '000':
                             got = [{**x, 'fs_div': fs, 'stock_code': r.stock_code} for x in body.get('list') or []]
                             break
+                        if status != '013':           # 013 = no such statement; anything else (e.g. 800/900 server errors) is retried
+                            settled = False
                     rows += got
-                    batch.append(r.corp_code)
+                    if got or settled:
+                        batch.append(r.corp_code)
                     if len(batch) >= 200:
                         flush(state, slot, rows, batch)
                         rows, batch = [], []

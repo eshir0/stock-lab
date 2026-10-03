@@ -19,7 +19,7 @@ ACTION = {'X-Stocklab-Action': '1'}
 
 
 def pack(symbol='005930', built=None, group=(0.4, 0.2), own=0.3, analog=(1.5, 20)):
-    return {'symbol': symbol, 'name': 'x', 'market': 'KR', 'etf': False, 'as_of_bar': '2026-10-02',
+    return {'symbol': symbol, 'name': 'x', 'market': 'KR', 'etf': False, 'as_of_bar': datetime.now().date().isoformat(),
             'built_at': (built or datetime.now()).isoformat(timespec='seconds'),
             'signals_now': {'momentum': 'BUY'},
             'group_base_rates': {'momentum': {'develop_2006_2018': {'mean_pct': group[0], 'ci95_pct': [-.1, .9]},
@@ -138,3 +138,17 @@ def test_the_request_sent_to_the_ai_carries_the_evidence_instructions_and_the_pa
     assert '과거 20년' not in plain['system'] and '과거 20년' in carried['system']
     assert '"triggered_rules"' in carried['prompt'] and 'triggered_rules' not in plain['prompt']
     store.release()
+
+
+def test_a_pack_built_today_from_old_prices_is_refused(tmp_path):
+    store = EvidenceStore(tmp_path)
+    old = pack()
+    old['as_of_bar'] = (datetime.now()-__import__('datetime').timedelta(days=12)).date().isoformat()
+    write(tmp_path, old)
+    assert store.get('005930') is None
+    recent = pack()
+    recent['as_of_bar'] = (datetime.now()-__import__('datetime').timedelta(days=3)).date().isoformat()   # a weekend
+    write(tmp_path, recent)
+    assert store.get('005930')['symbol'] == '005930'
+    write(tmp_path, dict(recent, stale=True))
+    assert store.get('005930') is None

@@ -19,7 +19,7 @@ def today(days=0):
 
 
 def give_pack(engine, folder, dividends, symbol='005930'):
-    (folder/f'{symbol}.json').write_text(json.dumps({'symbol': symbol, 'built_at': datetime.now().isoformat(timespec='seconds'),
+    (folder/f'{symbol}.json').write_text(json.dumps({'symbol': symbol, 'built_at': datetime.now().isoformat(timespec='seconds'), 'as_of_bar': today(),
                                                      'dividends': dividends}), encoding='utf-8')
     engine.evidence = EvidenceStore(folder)
 

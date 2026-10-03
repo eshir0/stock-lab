@@ -161,6 +161,30 @@ def universe():
     log(f'universe: US {len(us)} (ETF {int(us.etf.sum())}) · KR {len(kr)} (ETF {int(kr.etf.sum())}) · macro {len(MACRO)}')
 
 
+def naver_daily(code):
+    """Korean daily bars from Naver's chart feed for names Yahoo does not carry (also keeps delisted history). Naver's
+    prices are already adjusted, so adjclose = close. Days without trading come back with zero open/high/low."""
+    if not re.fullmatch(r'[0-9A-Z]{6}', str(code)):
+        return None
+    time.sleep(PACE)
+    r = get('https://fchart.stock.naver.com/sise.nhn', {'symbol': code, 'timeframe': 'day', 'count': 8000, 'requestType': 0})
+    if r is None or r.status_code != 200:
+        return None
+    rows = [x.split('|') for x in re.findall(r'item data="([^"]*)"', r.content.decode('euc-kr', 'replace'))]
+    if not rows:
+        return None
+    df = pd.DataFrame(rows, columns=['date', 'open', 'high', 'low', 'close', 'volume'])
+    for k in ('open', 'high', 'low', 'close', 'volume'):
+        df[k] = pd.to_numeric(df[k], errors='coerce')
+    df['date'] = pd.to_datetime(df['date'], format='%Y%m%d').dt.strftime('%Y-%m-%d')
+    for k in ('open', 'high', 'low'):
+        df.loc[df[k] <= 0, k] = df['close']
+    df['adjclose'] = df['close']
+    df = df[df['close'] > 0].reset_index(drop=True)
+    df.attrs['meta'] = {'currency': 'KRW', 'source': 'naver'}
+    return df if len(df) else None
+
+
 def load_universe(name):
     df = pd.read_parquet(DATA/'universe'/f'{name}.parquet')
     limit = int(os.environ.get('LIMIT', '0'))      # for trial runs
@@ -185,17 +209,25 @@ def daily(full=False):
         key = f'{market}:{r.yahoo}'
         path = DATA/'daily'/market/f'{safe(r.yahoo)}.parquet'
         last = done.get(key, {})
-        if not full and path.exists() and today-last.get('at', 0) < 18*3600:
+        if not full and path.exists() and 'error' not in last and today-last.get('at', 0) < 18*3600:
+            continue
+        if not full and 'error' in last and today-last.get('tried', 0) < 6*3600:
             continue
         # A whole-history read once a month (dividend adjustments move adjclose back in time), otherwise the last month.
         whole = full or not path.exists() or today-last.get('full_at', 0) > 30*86400
         params = {'period1': 0, 'period2': int(today), 'interval': '1d'} if whole else {'range': '1mo', 'interval': '1d'}
         df, events = chart(r.yahoo, **params)
+        if df is None and market == 'KR':
+            df, events = naver_daily(r.symbol), {}                 # names Yahoo does not carry
+            if df is None:
+                events = 'not on Yahoo or Naver'
         if df is None:
-            done[key] = {**last, 'at': today, 'error': events}
+            # 'at' stays the last SUCCESS (or absent), so a failed name is never counted or skipped as fresh.
+            done[key] = {**{k: v for k, v in last.items() if k != 'error'}, 'tried': today, 'error': events}
         else:
-            df['date'] = df['time'].dt.tz_convert(df.attrs['meta'].get('exchangeTimezoneName') or 'UTC').dt.date.astype(str)
-            df = df.drop(columns='time')
+            if 'time' in df:
+                df['date'] = df['time'].dt.tz_convert(df.attrs['meta'].get('exchangeTimezoneName') or 'UTC').dt.date.astype(str)
+                df = df.drop(columns='time')
             if not whole and path.exists():
                 old = pd.read_parquet(path)
                 df = pd.concat([old[~old['date'].isin(df['date'])], df]).sort_values('date')
@@ -245,11 +277,18 @@ def intraday(job, interval, rng, n_us, n_kr):
     for market, n in (('US', n_us), ('KR', n_kr)):
         for symbol in liquid(market, n):
             key = f'{market}:{symbol}'
-            if now-done.get(key, {}).get('at', 0) < 18*3600:
+            last = done.get(key, {})
+            if 'error' not in last and now-last.get('at', 0) < 18*3600:
+                continue
+            if 'error' in last and now-last.get('tried', 0) < 6*3600:
                 continue
             df, events = chart(symbol, range=rng, interval=interval)
+            for shorter in (('365d', '90d') if df is None and job == 'hourly' else ()):
+                df, events = chart(symbol, range=shorter, interval=interval)     # listed less than two years ago
+                if df is not None:
+                    break
             if df is None:
-                done[key] = {'at': now, 'error': events}
+                done[key] = {**{k: v for k, v in last.items() if k != 'error'}, 'tried': now, 'error': events}
                 continue
             df = df.drop(columns=[c for c in ('adjclose',) if c in df])
             if job == 'hourly':
@@ -280,7 +319,7 @@ def status():
     print(f'archive {size/1e9:.2f} GB')
     for job in ('daily', 'hourly', 'minute'):
         items = m.get(job, {})
-        ok = [v for v in items.values() if 'rows' in v]
+        ok = [v for v in items.values() if 'rows' in v and 'error' not in v]
         print(f'{job}: {len(ok)} symbols, {sum(v["rows"] for v in ok):,} rows, {len(items)-len(ok)} failed')
 
 

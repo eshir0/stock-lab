@@ -122,7 +122,10 @@ def own(df, market, etf):
     firing = [k for k, v in now.items() if v]
     up = regime_masks(dates, market)['sma200']
     if firing:
-        same = np.all([sig[k].to_numpy() for k in firing], axis=0) & since & (up == up[-1])
+        quiet = [k for k in RULES if k not in firing]
+        # Exactly the same set of rules: the ones firing now fired then, and the ones quiet now were quiet then.
+        same = (np.all([sig[k].to_numpy() for k in firing], axis=0)
+                & (~np.any([sig[k].to_numpy() for k in quiet], axis=0) if quiet else True) & since & (up == up[-1]))
         same[-1] = False
         out['analogs'] = {'rules': firing, 'index_above_sma200': bool(up[-1]), 'forward_21d': dist(fwd21[same]),
                           'forward_5d': dist(fwd5[same])}
@@ -182,7 +185,11 @@ def num(x):
 
 
 def kr_fundamentals(con, code):
-    slots = sorted([p.name for p in (DATA/'dart'/'fin').glob('*_*') if p.is_dir()], reverse=True) if (DATA/'dart'/'fin').exists() else []
+    # Newest reporting period first: within a year annual (Dec) > Q3 (Sep) > half (Jun) > Q1 (Mar). A plain string sort put
+    # the Q1 report (11013) ahead of the half-year report (11012).
+    period = {'11013': 1, '11012': 2, '11014': 3, '11011': 4}
+    folders = [p.name for p in (DATA/'dart'/'fin').glob('*_*') if p.is_dir()] if (DATA/'dart'/'fin').exists() else []
+    slots = sorted((s for s in folders if s.split('_')[1] in period), key=lambda s: (int(s.split('_')[0]), period[s.split('_')[1]]), reverse=True)
     out = {'source': 'DART 오픈API (접수번호 앞 8자리 = 공시일)'}
     for slot in slots:
         rows = con.execute("select * from read_parquet(?) where stock_code = ? and sj_div in ('IS','CIS')",
@@ -262,6 +269,10 @@ def main():
                 pack['fundamentals'] = kr_fundamentals(con, symbol)
         except Exception as exc:
             pack['fundamentals_error'] = f'{type(exc).__name__}: {exc}'[:200]
+        # Prices that stopped updating make a pack the app must not take as current (the app checks the date too).
+        last_bar = datetime.fromisoformat(pack['as_of_bar'])
+        if (datetime.now()-last_bar).days > 8:
+            pack['stale'] = True
         tmp = out_dir/f'{symbol}.json.tmp'
         tmp.write_text(json.dumps(pack, ensure_ascii=False, default=str))
         tmp.replace(out_dir/f'{symbol}.json')

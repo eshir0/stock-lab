@@ -73,10 +73,8 @@ def run(market, symbols, params, start, end):
                     if day in data[s].index:
                         cash += sell_all(s, data[s].at[day, 'open'], pos, trades, day, k, etf)
                 pending = {}
-        for s, d in data.items():
-            if day in d.index:
-                last[s] = d.at[day, 'close']
-        # 1) yesterday's signals buy at today's open
+        # 1) yesterday's signals buy at today's open, sized on what is known then: yesterday's closes (2026-10-03 review:
+        #    the closes used to be updated first, so the size used today's close before it existed)
         for s in pending:
             d = data[s]
             if day not in d.index or s in pos:
@@ -124,6 +122,9 @@ def run(market, symbols, params, start, end):
                 cash += gross-fee
                 trades.append((s, p['day'], day, (gross-fee)/(p['cost']*(1+k['fee']/1e4))-1))
                 del pos[s]
+        for s, d in data.items():
+            if day in d.index:
+                last[s] = d.at[day, 'close']
         if limit and not halted and pos:
             close_eq = cash+sum(p['qty']*last.get(x, p['entry']) for x, p in pos.items())
             if close_eq/prev_eq-1 <= -limit:

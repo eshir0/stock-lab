@@ -109,6 +109,8 @@ def regime_masks(dates, market):
         df = pd.read_parquet(DATA/'daily'/'MACRO'/f'{name}.parquet')[['date', 'close']].dropna()
         return df.set_index('date')['close'].sort_index()
     idx, vix = series(INDEX[market]), series('^VIX')
+    if market == 'KR':
+        vix = vix.shift(1)       # at the Korean close the US session of the same date has not happened yet
     frame = pd.DataFrame({'idx': idx, 'sma200': idx.rolling(200).mean(), 'sma50': idx.rolling(50).mean()})
     frame = frame.join(vix.rename('vix'), how='outer').sort_index().ffill()
     frame = frame.reindex(frame.index.union(pd.Index(dates))).ffill().reindex(pd.Index(dates))
@@ -137,7 +139,10 @@ def run_symbol(job):
     dates = df['date'].astype(str).to_numpy()
     c = adj['close'].to_numpy()
     jump = np.abs(np.diff(np.log(c), prepend=np.log(c[0]))) > .5
-    clean = ~(pd.Series(jump).rolling(85, min_periods=1).max().shift(-64).fillna(1).astype(bool).to_numpy())
+    # Bad prints are looked for only in what is known at the entry (the last 20 sessions and the signal day). A huge move
+    # AFTER the entry stays in: it is what the trade would have lived through (2026-10-03 review: the old window looked
+    # 64 sessions ahead and quietly dropped delisting crashes).
+    clean = ~(pd.Series(jump).rolling(21, min_periods=1).max().astype(bool).to_numpy())
     base = (value >= MIN_VALUE[market]) & np.isfinite(atr) & (dates >= START) & clean
     regimes = regime_masks(dates, market)
     o, h, l = adj['open'].to_numpy(), adj['high'].to_numpy(), adj['low'].to_numpy()

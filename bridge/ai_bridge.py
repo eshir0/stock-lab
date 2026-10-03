@@ -3,6 +3,7 @@
 The app container cannot see the CLIs or their logins, so it POSTs one analysis request here.
 Only fixed CLI arguments are used; the model gets no shell, file, MCP or plugin tools.
 """
+import http.client
 import http.server
 import ipaddress
 import json
@@ -10,6 +11,7 @@ import os
 import re
 import secrets
 import socket
+import ssl
 import subprocess
 import tempfile
 import threading
@@ -290,41 +292,64 @@ def parse_codex(lines):
     return {'data': data, 'usage': {'total_tokens': total}}
 
 
-def public_url(url):
-    """Allow only http(s) URLs whose host resolves exclusively to public addresses."""
+def public_address(url):
+    """The address to connect to for an http(s) URL whose host resolves only to public addresses, else None. The caller
+    connects to exactly this address, so a second DNS answer (rebinding to an internal host) is never used."""
     parsed = urlparse(url)
     if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
-        return False
-    try:
-        infos = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80))
-    except OSError:
-        return False
-    return bool(infos) and all(ipaddress.ip_address(info[4][0]).is_global for info in infos)
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
         return None
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80),
+                                   type=socket.SOCK_STREAM)
+    except OSError:
+        return None
+    if not infos or not all(ipaddress.ip_address(info[4][0]).is_global for info in infos):
+        return None
+    return infos[0][4][0]
+
+
+def public_url(url):
+    """Allow only http(s) URLs whose host resolves exclusively to public addresses."""
+    return public_address(url) is not None
+
+
+def fetch_status(url, address, timeout):
+    """(status, Location) of a GET to `url`, connecting to the already checked `address` while keeping the real host name
+    for the Host header, TLS SNI and certificate check."""
+    parsed = urlparse(url)
+    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    path = (parsed.path or '/')+('?'+parsed.query if parsed.query else '')
+    sock = socket.create_connection((address, port), timeout=timeout)
+    if parsed.scheme == 'https':
+        context = ssl.create_default_context()
+        sock = context.wrap_socket(sock, server_hostname=parsed.hostname)
+        conn = http.client.HTTPSConnection(parsed.hostname, port, timeout=timeout, context=context)
+    else:
+        conn = http.client.HTTPConnection(parsed.hostname, port, timeout=timeout)
+    conn.sock = sock
+    try:
+        conn.request('GET', path, headers={'User-Agent': 'Mozilla/5.0 stocklab-source-check'})
+        response = conn.getresponse()
+        return response.status, response.getheader('Location')
+    finally:
+        conn.close()
 
 
 def reachable(url, deadline):
     """Codex reports no search-result list, so the bridge itself fetches each cited page once."""
-    opener = urllib.request.build_opener(_NoRedirect)
     for _ in range(4):
-        if time.monotonic() > deadline or not public_url(url):
+        address = public_address(url) if time.monotonic() <= deadline else None
+        if not address:
             return False
-        request = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 stocklab-source-check'})
         try:
-            with opener.open(request, timeout=6) as response:
-                return response.status < 400
-        except urllib.error.HTTPError as exc:
-            location = exc.headers.get('Location') if 300 <= exc.code < 400 else None
-            if not location:
-                # Many news sites reject bots (401/403/429) although the page exists.
-                return exc.code in (401, 403, 429)
-            url = urllib.parse.urljoin(url, location)
+            status, location = fetch_status(url, address, 6)
         except Exception:
             return False
+        if 300 <= status < 400 and location:
+            url = urllib.parse.urljoin(url, location)            # every hop is checked and pinned again
+            continue
+        # Many news sites reject bots (401/403/429) although the page exists.
+        return status < 400 or status in (401, 403, 429)
     return False
 
 

@@ -328,3 +328,12 @@ def test_summary_shows_the_sample_size_and_never_invents_numbers():
     got = u.summarize(history)
     assert got['US']['days'] == 2 and got['US']['excess_pool_pct'] == -.25 and got['US']['beat_pool_days'] == 1
     assert got['US']['excess_fixed_pct'] == -.5 and got['KR'] == {'days': 0} and got['all']['days'] == 2
+
+
+def test_a_name_both_recommended_and_avoided_is_avoided():
+    from app.universe import choose
+    passed = [{'symbol': 'SPY'}, {'symbol': 'QQQ'}, {'symbol': 'AAPL'}]
+    ai = {'grounded': True, 'picks': [{'symbol': 'SPY', 'priced_in_risk': 'low'}, {'symbol': 'QQQ', 'priced_in_risk': 'low'}],
+          'avoid': [{'symbol': 'SPY'}]}
+    picks, notes = choose(passed, ai, 2)
+    assert [p['symbol'] for p in picks] == ['QQQ', 'AAPL'] and any('회피로 처리' in n for n in notes)

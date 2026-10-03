@@ -300,6 +300,10 @@ def choose(passed, ai, n):
             if pick.get('priced_in_risk') not in RISK_ORDER:
                 notes.append(f'{symbol}: 이미 가격에 반영됐을 위험이 커서 제외했습니다.')
                 continue
+            if symbol in avoid:
+                # The same answer also says to avoid it: the warning wins over the recommendation.
+                notes.append(f'{symbol}: AI가 추천과 회피에 함께 넣어 회피로 처리했습니다.')
+                continue
             if len(picks) < n:
                 picks.append({**offered[symbol], 'source': 'ai', 'ai': {k: pick.get(k) for k in
                                                                        ('theme', 'catalyst', 'priced_in_risk', 'reason')}})

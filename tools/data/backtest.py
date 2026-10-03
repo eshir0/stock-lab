@@ -123,7 +123,7 @@ def simulate(path, market, etf, start_date, pool):
     value = pd.Series(raw_close*volume).rolling(60).median().to_numpy()
     dates = df['date'].to_numpy()
     o, h, l, c = (adj[k].to_numpy() for k in ('open', 'high', 'low', 'close'))
-    # Bad prints: a day that moves more than 60% with no split recorded is skipped as an entry and ends the scan of a trade.
+    # Bad prints: an entry is skipped when a day of the last 20 sessions moved more than ~65% (log 0.5); later moves stay in.
     jumps = np.abs(np.diff(np.log(c), prepend=np.log(c[0]))) > .5
     buy = sig.any(axis=1).to_numpy()
     cost = cost_of(market, etf)
@@ -134,7 +134,7 @@ def simulate(path, market, etf, start_date, pool):
             continue
         if not pool and not (value[t] >= MIN_VALUE[market]):
             continue
-        if not np.isfinite(atr_pct[t]) or jumps[max(0, t-20):t+64].any():
+        if not np.isfinite(atr_pct[t]) or jumps[max(0, t-20):t+1].any():       # only what is known at the entry
             continue
         entry_i = t+1
         entry = o[entry_i]

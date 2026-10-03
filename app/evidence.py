@@ -15,13 +15,15 @@ from datetime import datetime
 from pathlib import Path
 
 MAX_AGE = 4*86400
+# The prices under a pack must be recent too: a pack rebuilt today from a price file that stopped updating is not fresh.
+# 8 calendar days covers a weekend plus the longest Korean holiday run (Chuseok/Lunar New Year with substitutes).
+MAX_BAR_AGE = 8*86400
 RULE_NAMES = {'golden_cross': '골든크로스', 'momentum': '모멘텀', 'mean_reversion': '평균회귀', 'breakout': '돌파'}
 
 
 class EvidenceStore:
     def __init__(self, folder):
         self.folder = Path(folder) if folder else None
-        self.cache = {}
 
     def get(self, symbol, now=None):
         """The pack for `symbol`, or None."""
@@ -30,13 +32,7 @@ class EvidenceStore:
             return None
         path = self.folder/f'{symbol}.json'
         try:
-            stamp = path.stat().st_mtime
-            cached = self.cache.get(symbol)
-            if cached and cached[0] == stamp:
-                pack = cached[1]
-            else:
-                pack = json.loads(path.read_text(encoding='utf-8'))
-                self.cache[symbol] = (stamp, pack)
+            pack = json.loads(path.read_text(encoding='utf-8'))      # ~4 KB, read fresh each time: no stale cache
         except (OSError, ValueError):
             return None
         if not isinstance(pack, dict) or pack.get('symbol') != symbol:
@@ -45,7 +41,13 @@ class EvidenceStore:
             built = datetime.fromisoformat(str(pack.get('built_at'))).timestamp()
         except ValueError:
             return None
-        return pack if 0 <= now-built <= MAX_AGE else None
+        if not 0 <= now-built <= MAX_AGE or pack.get('stale'):
+            return None
+        try:
+            bar = datetime.fromisoformat(str(pack.get('as_of_bar'))).timestamp()
+        except ValueError:
+            return None
+        return pack if now-bar <= MAX_BAR_AGE else None
 
 
 def _mean(block, *path):

@@ -164,21 +164,38 @@ def report(trades, dividends=()):
 
 def benchmark_entry(symbol, bars, started_at, previous=None):
     """An index ETF bought at the last completed close at or before the experiment's start and simply held: its return and
-    worst drawdown to the latest completed close. Once set, the starting close never moves. None until bars exist."""
-    bars = [b for b in bars or [] if isinstance(b.get('close'), (int, float)) and b['close'] > 0]
+    worst drawdown to the latest completed close. Once set, the starting close never moves. None until bars exist.
+
+    The fetch only covers the last few months, so the highest close and the worst drawdown are carried in the entry and
+    only bars newer than the last one processed are added: an empty answer, or a window that no longer reaches back to an
+    early peak, never erases what was already seen."""
+    bars = sorted((b for b in bars or [] if isinstance(b.get('close'), (int, float)) and b['close'] > 0), key=lambda b: b['time'])
     if previous and previous.get('symbol') == symbol and previous.get('start_close'):
         start_time, start = previous['start_time'], previous['start_close']
+        seen = previous.get('last_time', start_time)
+        if 'peak' in previous:
+            peak, worst = previous['peak'], previous.get('max_drawdown_pct', 0.0)
+        else:                          # an entry saved before the peak was kept: rebuild it from what is still visible
+            peak, worst = start, previous.get('max_drawdown_pct', 0.0)
+            for b in bars:
+                if start_time < b['time'] <= seen:
+                    peak = max(peak, b['close'])
+        new = [b for b in bars if b['time'] > seen]
+        if not new:
+            return dict(previous, peak=peak)
+        last_time, last_close = previous.get('last_time', start_time), previous.get('last_close', start)
     else:
         before = [b for b in bars if b['time'] <= started_at]
         if not before:
             return previous
         start_time, start = before[-1]['time'], before[-1]['close']
-    after = [b for b in bars if b['time'] > start_time]
-    last = after[-1] if after else {'time': start_time, 'close': start}
-    peak, worst = start, 0.0
-    for close in [start]+[b['close'] for b in after]:
-        peak = max(peak, close)
-        worst = max(worst, (peak-close)/peak*100)
+        peak, worst = start, 0.0
+        new = [b for b in bars if b['time'] > start_time]
+        last_time, last_close = start_time, start
+    for b in new:
+        peak = max(peak, b['close'])
+        worst = max(worst, (peak-b['close'])/peak*100)
+        last_time, last_close = b['time'], b['close']
     return {'symbol': symbol, 'name': SYMBOLS[symbol]['name'], 'start_time': start_time, 'start_close': start,
-            'last_time': last['time'], 'last_close': last['close'], 'return_pct': round((last['close']/start-1)*100, 3),
-            'max_drawdown_pct': round(worst, 3)}
+            'last_time': last_time, 'last_close': last_close, 'return_pct': round((last_close/start-1)*100, 3),
+            'max_drawdown_pct': round(worst, 3), 'peak': peak}

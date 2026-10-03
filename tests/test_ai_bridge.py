@@ -313,3 +313,38 @@ def test_room_again_ends_a_cooldown_and_a_full_window_starts_one(monkeypatch):
 
 def test_read_direct_survives_missing_logins(tmp_path):
     assert ai_bridge.read_direct(home=str(tmp_path)) == {}
+
+
+# ---- the source check connects to the address it checked (2026-10-03 review, CWE-918) -------------------------------------------
+
+def test_a_second_dns_answer_is_never_used(monkeypatch):
+    answers = iter([[(2, 1, 6, '', ('8.8.8.8', 443))], [(2, 1, 6, '', ('127.0.0.1', 443))]])
+    monkeypatch.setattr(ai_bridge.socket, 'getaddrinfo', lambda *a, **k: next(answers))
+    connected = []
+
+    def fake_fetch(url, address, timeout):
+        connected.append(address)
+        return 200, None
+    monkeypatch.setattr(ai_bridge, 'fetch_status', fake_fetch)
+    assert ai_bridge.reachable('https://news.example/a', ai_bridge.time.monotonic()+10)
+    assert connected == ['8.8.8.8']                                              # one lookup, pinned
+
+
+def test_a_redirect_to_an_internal_host_is_refused(monkeypatch):
+    def lookup(host, *a, **k):
+        return [(2, 1, 6, '', ('8.8.8.8' if host == 'news.example' else '10.0.0.5', 443))]
+    monkeypatch.setattr(ai_bridge.socket, 'getaddrinfo', lookup)
+    hops = []
+
+    def fake_fetch(url, address, timeout):
+        hops.append(address)
+        return 302, 'https://intranet.example/admin'
+    monkeypatch.setattr(ai_bridge, 'fetch_status', fake_fetch)
+    assert not ai_bridge.reachable('https://news.example/a', ai_bridge.time.monotonic()+10) and hops == ['8.8.8.8']
+
+
+def test_bot_refusals_still_count_as_a_page_that_exists(monkeypatch):
+    monkeypatch.setattr(ai_bridge.socket, 'getaddrinfo', lambda *a, **k: [(2, 1, 6, '', ('8.8.8.8', 443))])
+    for status, ok in ((200, True), (403, True), (429, True), (404, False), (500, False)):
+        monkeypatch.setattr(ai_bridge, 'fetch_status', lambda *a, s=status: (s, None))
+        assert ai_bridge.reachable('https://news.example/a', ai_bridge.time.monotonic()+10) is ok
