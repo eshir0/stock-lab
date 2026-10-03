@@ -58,8 +58,8 @@ sudo install -m 644 tools/data/*.py tools/data/Dockerfile /opt/stocklab-data/
 docker build -t stocklab-data /opt/stocklab-data
 # SEC는 User-Agent에 연락처를, DART는 API 키를 요구합니다. 관리자 전용 파일에만 둡니다.
 sudo sh -c 'umask 077; printf "SEC_CONTACT=you@example.com\nDART_KEY=발급받은키\n" > /opt/stocklab-data/contact.env'
-sudo install -m 644 tools/data/stocklab-data.service tools/data/stocklab-data.timer /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now stocklab-data.timer
+sudo install -m 644 tools/data/stocklab-data.service tools/data/stocklab-data.timer tools/data/stocklab-fx.service tools/data/stocklab-fx.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now stocklab-data.timer stocklab-fx.timer
 ```
 
 컨테이너는 읽기 전용 루트, 모든 권한 제거, 메모리·CPU 제한, 낮은 우선순위로 돌아 사이트에 영향을 주지 않습니다. 전체 첫 수집은 일봉만 약 6시간, DART는 약 10일 걸립니다. `python collector.py status`로 진행 상황을 봅니다.
@@ -85,6 +85,26 @@ sudo systemctl daemon-reload && sudo systemctl enable --now stocklab-data.timer
 docker run --rm -e DATA=/data -v /opt/stocklab-data:/code:ro -v /opt/stock-lab:/app:ro \
   -v /srv/stocklab-data:/data stocklab-data python backtest.py --workers 3
 ```
+
+## 🔬 사전 등록 연구
+
+결과를 보기 전에 질문·변형·채택 기준을 파일로 고정하고(`research_plan*.json`), 2006~2018로 고른 뒤 2019~2026으로 한 번만 확인합니다.
+
+| 연구 | 질문 | 결과 |
+|---|---|---|
+| `research.py` Q1 | 어떤 매수 신호에 AI를 부를까 | **채택**: 국내 주식 추세형 3종, 미국 주식 모멘텀·돌파, 미국 ETF 돌파 제외 |
+| Q2~Q5 | 시장 상황 필터 · 손절/익절 배수 · 보유 기간 · 추적 손절 | 기준 미달 (미국·국내가 반대 방향이거나 확인 기간에서 뒤집힘) |
+| `portfolio.py` Q7 | 사이트 종목 풀로 계좌 전체를 20년 운용하면 | 신호를 거른 뒤 국내 최대 낙폭 −67%→−25%. 규칙만으로는 지수 ETF 보유보다 낮은 수익 |
+| `research_plan_risk.json` | 300만 원 계좌의 거래당 위험(0.5/1/1.5%, 낙폭 연동) | 기준 미달 → 0.5% 유지 |
+| `research_plan_daily.json` | 일중 손실 한도(없음/2/3/5%) | 기준 미달 → 2% 유지(2%가 한도 없음보다 나음) |
+| Q6 | 실적 발표일 피하기 · 재무 필터 | DART 수집이 끝난 뒤 따로 등록 |
+
+`delisted.py`는 KRX 상장 폐지 목록과 네이버 일봉으로 국내 폐지 종목(약 1,200개)을 더해 생존 편향을 줄입니다.
+
+## 🧾 근거 묶음 · 환율
+
+- `evidence.py`(매일 수집 직후): 사이트 종목마다 `evidence/{종목}.json` — 지금 신호, 신호별 20년 성적(시장·유형/이 종목), 비슷한 상황의 21거래일 결과, 시장 상황, SEC·DART 재무·공시, 최근 배당. 앱이 읽기 전용으로 읽어 AI 분석과 배당 입금에 씀.
+- `fx.py` + `stocklab-fx.timer`(10분마다): `evidence/fx.json`에 원/달러(Yahoo KRW=X). 앱이 미국 계좌의 원화 가치를 계산.
 
 ## ⚠ 한계
 

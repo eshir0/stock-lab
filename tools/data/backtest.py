@@ -193,6 +193,7 @@ def main():
     p.add_argument('--start', default='2006-01-01')
     p.add_argument('--workers', type=int, default=3)
     p.add_argument('--pool-only', action='store_true')
+    p.add_argument('--with-delisted', action='store_true', help='add Korean delisted names (daily/KR_DELISTED)')
     a = p.parse_args()
     sys.path.insert(0, '/app')
     from app.instruments import SYMBOLS                     # the site's 36-name pool
@@ -200,8 +201,9 @@ def main():
     us = pd.read_parquet(DATA/'universe'/'us.parquet').set_index('yahoo')['etf'].to_dict()
     kr = pd.read_parquet(DATA/'universe'/'kr.parquet').set_index('yahoo')['etf'].to_dict()
     jobs = []
-    for market, etfs in (('US', us), ('KR', kr)):
-        for path in sorted((DATA/'daily'/market).glob('*.parquet')):
+    folders = [('US', us, 'US'), ('KR', kr, 'KR')] + ([('KR', {}, 'KR_DELISTED')] if a.with_delisted else [])
+    for market, etfs, folder in folders:
+        for path in sorted((DATA/'daily'/folder).glob('*.parquet')):
             in_pool = path.stem in pool or path.stem.replace('.KQ', '.KS') in pool
             if a.pool_only and not in_pool:
                 continue
@@ -211,9 +213,10 @@ def main():
         for i, result in enumerate(ex.map(simulate_job, jobs, chunksize=20)):
             trades.extend(result)
     df = pd.DataFrame(trades)
+    df['delisted'] = df['symbol'].str.fullmatch(r'[0-9A-Z]{6}')     # names under KR_DELISTED carry no .KS/.KQ suffix
     out = DATA/'results'
     out.mkdir(exist_ok=True)
-    tag = 'pool' if a.pool_only else 'all'
+    tag = ('pool' if a.pool_only else 'all')+('-delisted' if a.with_delisted else '')
     df.to_parquet(out/f'trades-{tag}.parquet', index=False)
     report = {'tag': tag, 'start': a.start, 'names': len(jobs), 'trades': len(df), 'cost_bp': COST,
               'overall': describe(df)}

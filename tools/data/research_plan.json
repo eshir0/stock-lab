@@ -1,0 +1,53 @@
+{
+  "registered": "2026-10-03 (KST), before any of these variants was run",
+  "purpose": "Pick server-side rule settings for the month swing from 2006-2026 history without fitting noise.",
+  "split": {
+    "develop": ["2006-01-01", "2018-12-31"],
+    "holdout": ["2019-01-01", "2026-12-31"],
+    "rule": "Variants are compared on the develop period only. The holdout is read once, for the variants that pass on develop."
+  },
+  "baseline": {
+    "signals": "any of golden_cross, momentum, mean_reversion, breakout (BUY)",
+    "stop": "1.5 x ATR14 (2-15%)",
+    "take": "1.5 x stop (3-40%)",
+    "exit": "C (trail, no sale at the target)",
+    "hold": 21,
+    "arm": 0.5,
+    "trail": "1.0 x stop distance",
+    "filters": "liquidity known at entry (KR 5bn KRW, US 20M USD median daily value over 60 sessions)",
+    "universe": "US listed stocks and ETFs (survivors only) + KR listed and delisted names"
+  },
+  "groups": ["US stock", "US ETF", "KR stock", "KR ETF"],
+  "questions": {
+    "Q1_signals": {
+      "variants": ["all", "golden_cross", "momentum", "breakout", "mean_reversion", "trend (golden|momentum|breakout)"],
+      "adopt": "A signal stops calling the AI for a group when its develop expectancy has a 95% CI entirely below 0 AND its holdout mean is below 0 (only drops, never adds)."
+    },
+    "Q2_regime": {
+      "variants": ["none", "index > 200d SMA", "index > 50d SMA", "VIX < 25", "index > 200d SMA and VIX < 30"],
+      "index": {"US": "^GSPC", "KR": "^KS11"},
+      "adopt": "Better than 'none' in develop mean for both markets, kept at least 40% of trades, and better in holdout for both markets."
+    },
+    "Q3_stop_take": {
+      "variants": {"stop_atr": [1.0, 1.5, 2.0, 3.0], "take_mult": [1.5, 2.0, 3.0]},
+      "adopt": "A cell replaces the baseline only if it beats it on develop in both markets by at least 0.05 percentage points per trade and also beats it in holdout in both markets. Applied as a guide/limit on the AI's plan, not a fixed value."
+    },
+    "Q4_hold": {
+      "variants": [21, 42, 63],
+      "adopt": "Same rule as Q3. The site's maximum stays 30 days unless 42 or 63 pass."
+    },
+    "Q5_trailing": {
+      "variants": {"arm": [0.3, 0.5, 0.8, 1.0], "trail_mult": [0.75, 1.0, 1.5]},
+      "adopt": "Same rule as Q3."
+    },
+    "Q7_portfolio": {
+      "what": "Daily account simulation on the site's 36-name pool with the adopted settings: risk 0.5% per trade, 30% per name, cash only, real costs; equity, max drawdown, return vs holding the index ETF, by currency.",
+      "adopt": "Reference only: shows whether the 5% drawdown bar of the verification plan is realistic."
+    },
+    "Q6_fundamentals": {
+      "what": "Earnings-date avoidance and profitability filters from SEC (US) and DART (KR), using filing dates only.",
+      "when": "After the DART archive is complete (about 10 days); registered separately before it is run."
+    }
+  },
+  "honesty": "Every result is reported, including 'no effect'. Rule-only entries; the AI's own picks cannot be backtested. US data has survivorship bias."
+}

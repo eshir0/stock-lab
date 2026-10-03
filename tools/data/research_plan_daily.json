@@ -1,0 +1,8 @@
+{
+  "registered": "2026-10-03 (KST), before any of these variants was run",
+  "purpose": "The site's daily loss limit sells every position of the currency when the day's loss reaches the limit. Is that good for a month swing?",
+  "setup": "portfolio.py on the site's pool, research filter, exit C, risk 0.5%, 30% per name, seeds KRW 7,000,000 / USD 750 (the new defaults). The day's loss is measured from the previous close's equity; a gap down past the limit sells at the open, otherwise a close past the limit sells at the close; no new buys that day.",
+  "split": {"develop": ["2006-01-01", "2018-12-31"], "holdout": ["2019-01-01", "2026-12-31"]},
+  "variants": {"D0": "no daily limit", "D2": "2% (site default)", "D3": "3%", "D5": "5%"},
+  "adopt": "The variant with the best MAR (CAGR / |max drawdown|) on develop in both markets becomes the default only if its holdout MAR is also at least D2's in both markets. Otherwise 2% stays."
+}

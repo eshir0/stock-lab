@@ -1,0 +1,15 @@
+{
+  "registered": "2026-10-03 (KST), before any of these variants was run",
+  "purpose": "Position sizing that adapts to the account: a 3,000,000 KRW (or USD 2,230) account, whole shares in Korea.",
+  "setup": "portfolio.py on the site's pool, research signal filter, exit C, real costs, 30% per name, KRW 3,000,000 / USD 2,230 seeds",
+  "split": {"develop": ["2006-01-01", "2018-12-31"], "holdout": ["2019-01-01", "2026-12-31"]},
+  "variants": {
+    "R1": "risk 0.5% of equity per trade, fixed (the site's current default)",
+    "R2": "risk 1.0%, fixed",
+    "R3": "risk 1.5%, fixed",
+    "R4": "risk 1.0% scaled down by the account's drawdown from its high: x(1 - drawdown/20%), at least x0.5",
+    "R5": "risk 1.5% scaled the same way"
+  },
+  "measure": "MAR = CAGR / |max drawdown| per market; also CAGR, max drawdown, trades, and the share of signals skipped because the size came to zero shares",
+  "adopt": "The variant with the best develop MAR in both markets replaces R1 only if its holdout MAR is also at least R1's in both markets and its max drawdown stays within the index ETF's over the same period. Otherwise R1 stays."
+}

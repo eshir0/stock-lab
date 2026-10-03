@@ -1,0 +1,11 @@
+[Unit]
+Description=Stock Lab USD/KRW rate for the paper account's KRW view (Yahoo, never Toss)
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+Nice=10
+ExecStart=/usr/bin/docker run --rm --name stocklab-fx --memory 256m --cpus 0.5 --read-only --tmpfs /tmp \
+  --cap-drop ALL --security-opt no-new-privileges -e DATA=/data \
+  -v /opt/stocklab-data:/code:ro -v /srv/stocklab-data:/data stocklab-data python fx.py
