@@ -371,13 +371,19 @@ def generate(request):
     if not isinstance(system, str) or not isinstance(prompt, str) or not isinstance(schema, dict) or tier not in TIERS:
         return 400, {'ok': False, 'message': 'invalid request'}
     until = cooling(provider)
-    if until:
+    # A probe (the app's occasional re-check of a provider it believes is exhausted) is let through: limits sometimes reset
+    # before the time the CLI announced, and without a real call nobody would ever notice.
+    if until and not request.get('probe'):
         return 200, {'ok': False, 'exhausted': True, 'until': until, 'message': provider+' 사용량 소진 (대기 중)'}
     if not _slots[provider].acquire(timeout=60):
         return 200, {'ok': False, 'exhausted': False, 'message': provider+' 동시 실행 대기 초과'}
     try:
         result = RUNNERS[provider](load_env(), system, prompt, schema, bool(request.get('search')), tier)
         note_limits(provider, result.get('limits'))
+        if until:
+            with _cooldown_lock:
+                _cooldown.pop(provider, None)        # it answered: the limit is over
+            save_state()
         return 200, dict(result, ok=True)
     except Exhausted as exc:
         note_limits(provider, exc.limits)
@@ -447,8 +453,112 @@ class Handler(http.server.BaseHTTPRequestHandler):
         print('%s %s' % (self.address_string(), fmt % args), flush=True)
 
 
+# ---- direct usage readings (the owner chose this on 2026-10-03) -------------------------------------------------------------
+# The subscriptions' own usage endpoints, read with the logins this host's CLIs already hold (no AI request is sent): the
+# ChatGPT endpoint the Codex settings page uses and the Claude endpoint behind Claude Code's /usage. Neither is a documented
+# public API, so any failure (expired token, changed shape) is ignored and the readings that came with real calls stay.
+DIRECT_EVERY = 120
+CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
+CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
+
+
+def _iso_epoch(value):
+    try:
+        return datetime.fromisoformat(str(value).replace('Z', '+00:00')).timestamp()
+    except ValueError:
+        return None
+
+
+def codex_reading(body):
+    """{'status', 'windows'} from the ChatGPT usage payload, or None."""
+    limit = (body or {}).get('rate_limit') if isinstance(body, dict) else None
+    if not isinstance(limit, dict):
+        return None
+    windows = {}
+    for key, name in (('primary_window', 'five_hour'), ('secondary_window', 'seven_day')):
+        w = limit.get(key)
+        if isinstance(w, dict) and isinstance(w.get('used_percent'), (int, float)):
+            windows[name] = {'utilization': w['used_percent']/100, 'resets_at': w.get('reset_at')}
+    if not windows:
+        return None
+    return {'status': 'rejected' if limit.get('limit_reached') else 'allowed', 'type': 'direct', 'windows': windows}
+
+
+def claude_reading(body):
+    if not isinstance(body, dict):
+        return None
+    windows = {}
+    for name in ('five_hour', 'seven_day'):
+        w = body.get(name)
+        if isinstance(w, dict) and isinstance(w.get('utilization'), (int, float)):
+            windows[name] = {'utilization': w['utilization']/100, 'resets_at': _iso_epoch(w.get('resets_at'))}
+    if not windows:
+        return None
+    full = any(w['utilization'] >= 1 for w in windows.values())
+    return {'status': 'rejected' if full else 'allowed', 'type': 'direct', 'windows': windows}
+
+
+def _get_json(url, headers):
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read())
+
+
+def read_direct(home=os.path.expanduser('~')):
+    """{provider: reading} for the providers whose usage could be read right now."""
+    out = {}
+    try:
+        with open(os.path.join(os.environ.get('CODEX_HOME') or os.path.join(home, '.codex'), 'auth.json'), encoding='utf-8') as f:
+            tokens = json.load(f).get('tokens') or {}
+        headers = {'Authorization': 'Bearer '+tokens['access_token'], 'Accept': 'application/json', 'User-Agent': 'codex-cli'}
+        if tokens.get('account_id'):
+            headers['ChatGPT-Account-Id'] = tokens['account_id']
+        reading = codex_reading(_get_json(CODEX_USAGE_URL, headers))
+        if reading:
+            out['codex'] = reading
+    except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError):
+        pass
+    try:
+        with open(os.path.join(home, '.claude', '.credentials.json'), encoding='utf-8') as f:
+            token = json.load(f)['claudeAiOauth']['accessToken']
+        reading = claude_reading(_get_json(CLAUDE_USAGE_URL, {'Authorization': 'Bearer '+token,
+                                                              'anthropic-beta': 'oauth-2025-04-20', 'Accept': 'application/json'}))
+        if reading:
+            out['claude'] = reading
+    except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError):
+        pass
+    return out
+
+
+def apply_direct(readings, now=None):
+    """Store fresh readings; a provider whose windows all have room again loses its cooldown (limits can reset early), one
+    that is full gets a cooldown until the full window resets."""
+    now = time.time() if now is None else now
+    for provider, reading in readings.items():
+        note_limits(provider, reading)
+        full = [w for w in reading['windows'].values() if w['utilization'] >= 1]
+        if full:
+            resets = [w['resets_at'] for w in full if isinstance(w.get('resets_at'), (int, float))]
+            set_cooldown(provider, max(resets) if resets else now+EXHAUSTED_COOLDOWN)
+        elif cooling(provider):
+            with _cooldown_lock:
+                _cooldown.pop(provider, None)
+            save_state()
+
+
+def direct_loop():
+    while True:
+        if load_env().get('USAGE_DIRECT', 'on').strip().lower() != 'off':
+            try:
+                apply_direct(read_direct())
+            except Exception:                    # never let the reader take the bridge down
+                pass
+        time.sleep(DIRECT_EVERY)
+
+
 def main():
     load_state()
+    threading.Thread(target=direct_loop, daemon=True).start()
     host, _, port = load_env().get('AI_BRIDGE_BIND', '172.17.0.1:8765').rpartition(':')
     server = http.server.ThreadingHTTPServer((host, int(port)), Handler)
     print('stocklab ai bridge listening on %s:%s' % (host, port), flush=True)

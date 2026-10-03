@@ -48,6 +48,8 @@ def trailed_stop(position, high_water):
     raised = max(stop, average*(1+BREAKEVEN_PCT/100), high_water*(1-trail/100))
     if raised <= stop:
         return stop
+    if position.get('exit_mode') == 'trail':
+        return max(stop, round(raised, 2))      # no sale at the target: the stop keeps following the high past it
     # Two decimals, and always strictly below the target: at the target the position is sold as a winner anyway.
     return max(stop, min(round(raised, 2), round(take-.01, 2)))
 
@@ -90,6 +92,9 @@ def _shares(value, name, fractional):
     return Decimal(int(number))
 
 
+EXIT_MODES = ('target', 'trail')   # target: sell all at the take-profit (A) · trail: keep going on the trailing stop (C)
+
+
 def normalize_settings(settings=None):
     if settings is None:
         settings = {}
@@ -112,9 +117,19 @@ def normalize_settings(settings=None):
         raise RiskError('최대 보유 시간은 정수 분으로 입력하세요.')
     # The most of the account one name may take. Saved experiments without it keep the old 30%.
     position = _decimal(settings.get('max_position_pct', 30), '종목당 최대 비중', 10, 100)
+    # Saved experiments without the key keep selling at the target, the rule they were started with.
+    exit_mode = settings.get('exit_mode', 'target')
+    signal_filter = settings.get('signal_filter', 'all')       # saved experiments act on every rule, as they started
+    use_evidence = settings.get('evidence', 'off')              # ... and analyse without the archive's evidence packs
+    if use_evidence not in ('on', 'off'):
+        raise RiskError('과거 근거 사용은 on 또는 off여야 합니다.')
+    if signal_filter not in ('all', 'research'):
+        raise RiskError('매수 신호 거르기는 all 또는 research여야 합니다.')
+    if exit_mode not in EXIT_MODES:
+        raise RiskError('익절 방식은 target 또는 trail이어야 합니다.')
     return {'include_leveraged_etfs': leveraged, 'universe_mode': universe, 'horizon': horizon,
             'risk_per_trade_pct': float(risk), 'daily_loss_limit_pct': float(daily), 'max_holding_minutes': int(holding),
-            'max_position_pct': shares.number(position)}
+            'max_position_pct': shares.number(position), 'exit_mode': exit_mode, 'signal_filter': signal_filter, 'evidence': use_evidence}
 
 
 def _instrument(symbol):

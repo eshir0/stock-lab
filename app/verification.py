@@ -16,8 +16,12 @@ from .agents import desk_prompts
 from .risk import BOUNDS, BREAKEVEN_PCT, TRAIL_ARM
 
 STRATEGY_VERSION = 1       # raise when the strategy's logic changes in a way the fingerprint below cannot see
+# Criteria version 2 (2026-10-03): the drawdown bar is the index ETF's own drawdown over the same weeks (a long-only stock
+# account cannot stay inside a fixed 5% when the market falls; the 2006-2026 account simulation's worst drawdown was about
+# 25% even after the research filter), with a small floor so a calm market does not fail a normal dip. Plans fixed under
+# version 1 (max_drawdown_pct) keep their own rule.
 CRITERIA = {'min_days': 56, 'min_trades': 30, 'min_decisions': 100, 'decision_horizon': 'd5',
-            'max_drawdown_pct': 5.0, 'drop_best_days': 3}
+            'drawdown_vs_index': True, 'drawdown_floor_pct': 3.0, 'drop_best_days': 3, 'criteria_version': 2}
 CONFIG_KEYS = ('fee_kr', 'fee_us', 'sell_tax_kr', 'slippage_bps', 'min_take_cost_ratio', 'research_reuse_seconds',
                'research_reuse_move_pct', 'conditional_entry', 'interval_seconds', 'focus_per_market', 'focus_ai',
                'fractional_us', 'providers', 'ai_light_roles', 'claude_model', 'claude_model_light', 'codex_model')
@@ -41,6 +45,16 @@ def start(config, now):
     return {'started_at': now, 'version': STRATEGY_VERSION, 'fingerprint': fingerprint(config), 'criteria': dict(CRITERIA)}
 
 
+def official(verdict, now):
+    """The first decided verdict, frozen. A plan that is checked again and again while it runs on will sooner or later
+    show a lucky 'pass' (optional stopping), so the verdict at the moment the samples first complete is the official one
+    and later verdicts are shown only for reference. None until there is a decision, or when one is already fixed."""
+    if not verdict or verdict.get('official') or verdict.get('status') not in ('pass', 'fail'):
+        return None
+    return {'status': verdict['status'], 'time': now, 'strategy_changed': verdict.get('strategy_changed'),
+            'progress': verdict['progress'], 'checks': verdict['checks']}
+
+
 def daily_changes(daily, initial):
     """Equity change of each recorded day: last value of the day minus the day before (the first day against the seed)."""
     out, previous = [], initial
@@ -60,7 +74,9 @@ def judge(state, *, tracking, report, evaluation, config, now):
     plan = state.get('verification')
     if not plan:
         return None
-    c = {**CRITERIA, **(plan.get('criteria') or {})}
+    fixed = plan.get('criteria') or {}
+    c = {**CRITERIA, **fixed}
+    legacy_drawdown = 'max_drawdown_pct' in fixed and 'drawdown_vs_index' not in fixed
     performance, benchmark = state.get('performance') or {}, state.get('benchmark') or {}
     initial = state.get('initial') or {}
     active = [cy for cy in ('KRW', 'USD') if initial.get(cy, 0) > 0]
@@ -86,8 +102,17 @@ def judge(state, *, tracking, report, evaluation, config, now):
             f'이 실험 {_pct(mine)} · 지수 {_pct(index["return_pct"])}' if index else '지수 일봉을 아직 읽지 못했습니다')
     for cy in active:
         drawdown = (performance.get(cy) or {}).get('max_drawdown_pct')
-        add('drawdown_'+cy, f'{cy} 최대 낙폭 ≤ {c["max_drawdown_pct"]:g}%',
-            None if drawdown is None else bool(drawdown <= c['max_drawdown_pct']), f'최대 낙폭 {drawdown or 0:.2f}%')
+        if legacy_drawdown:
+            add('drawdown_'+cy, f'{cy} 최대 낙폭 ≤ {c["max_drawdown_pct"]:g}%',
+                None if drawdown is None else bool(drawdown <= c['max_drawdown_pct']), f'최대 낙폭 {drawdown or 0:.2f}%')
+            continue
+        index = benchmark.get(cy) or {}
+        index_dd = index.get('max_drawdown_pct')
+        allowed = None if index_dd is None else max(index_dd, c['drawdown_floor_pct'])
+        add('drawdown_'+cy, f'{cy} 최대 낙폭 ≤ 같은 기간 {index.get("name") or "지수 ETF"}의 최대 낙폭 (최소 {c["drawdown_floor_pct"]:g}%까지 허용)',
+            None if drawdown is None or allowed is None else bool(drawdown <= allowed),
+            f'이 실험 {drawdown or 0:.2f}% · 지수 {index_dd:.2f}% · 허용 {allowed:.2f}%' if allowed is not None
+            else f'이 실험 {drawdown or 0:.2f}% · 지수 일봉을 아직 읽지 못했습니다')
     for cy in active:
         changes = daily_changes(((tracking.get(cy) or {}).get('daily') or {}), initial[cy])
         n = c['drop_best_days']
@@ -107,4 +132,6 @@ def judge(state, *, tracking, report, evaluation, config, now):
         status = 'pass' if all(ch['ok'] for ch in checks) else 'fail'
     return {'status': status, 'ready': ready, 'started_at': plan['started_at'], 'criteria': c, 'progress': progress,
             'checks': checks, 'strategy_changed': changed, 'version': plan.get('version'),
-            'ai_vs_rule': scored.get('ai_vs_rule')}
+            'ai_vs_rule': scored.get('ai_vs_rule'), 'exit_mode': plan.get('exit_mode', 'target'),
+            'signal_filter': plan.get('signal_filter', 'all'), 'evidence': plan.get('evidence', 'off'),
+            'official': plan.get('official')}

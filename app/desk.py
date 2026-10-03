@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from . import afterexit, entry, gate, history, pacing, reuse
+from . import afterexit, entry, evidence, gate, history, pacing, reuse
 from .agents import DESK_ROLES, STOPPED, market_context
 from .config import INSTRUMENTS as BASE_INSTRUMENTS
 from .instruments import INSTRUMENTS, SYMBOLS
@@ -16,7 +16,7 @@ from .live.shadow import record_shadow
 from .rules import RULE_NAMES, signals
 from .performance import performance_summary
 from .providers import ProviderError
-from .risk import RiskError, horizon_of, min_take_pct, round_trip_cost_pct, size_order, trailed_stop
+from .risk import RiskError, horizon_of, is_etf, min_take_pct, round_trip_cost_pct, size_order, trailed_stop
 from .store import event
 from .universe import ROTATION_WARMUP
 
@@ -150,14 +150,16 @@ class DeskMixin:
                 bars[symbol] = rows
             if rows is not None and len(rows) >= history.MIN_BARS:
                 signal = signals(rows)
+                ignore = gate.dropped((snapshot.get('strategy_settings') or {}).get('signal_filter', 'all'),
+                                      SYMBOLS[symbol]['market'], is_etf(symbol))
                 verdict = gate.assess(held=held, signals=signal, last=self.last_evaluation(snapshot, symbol),
-                                      price=mid(quote), now=now, forced=forced)
+                                      price=mid(quote), now=now, forced=forced, ignore=ignore)
             else:
                 verdict = {'eligible': forced, 'reason': 'requested' if symbol == requested else 'no_data', 'rules': []}
                 problem = problem or f'완료된 일봉 {len(rows or [])}개 (필요 {history.MIN_BARS}개)'
             verdicts[symbol] = dict(verdict, signals=signal, held=held)
             checks.append({'symbol': symbol, 'name': name, 'held': held, 'eligible': verdict['eligible'],
-                           'reason': verdict['reason'], 'rules': verdict['rules'],
+                           'reason': verdict['reason'], 'rules': verdict['rules'], 'filtered': verdict.get('filtered', []),
                            'signals': {k: v for k, v in signal.items() if v}, **({'detail': problem} if problem else {})})
             if verdict['eligible']:
                 eligible.append(cand)
@@ -196,7 +198,12 @@ class DeskMixin:
         return {'daily': {k: digest.get(k) for k in keys},
                 'rule_signals': {k: v for k, v in (verdict.get('signals') or {}).items() if v},
                 'rule_triggers': [RULE_NAMES.get(r, r) for r in verdict.get('rules') or []],
-                'focus': self.focus_note(state, symbol)}
+                'focus': self.focus_note(state, symbol),
+                **({'evidence': evidence.brief(self.evidence.get(symbol), verdict.get('rules'))} if self.uses_evidence(state) else {})}
+
+    @staticmethod
+    def uses_evidence(state):
+        return (state.get('strategy_settings') or {}).get('evidence') == 'on'
 
     def month_context(self, account, symbol, bars, verdict, now):
         """What the analysts get on top of the live quote: up to three months of daily bars and why they are being asked."""
@@ -290,6 +297,9 @@ class DeskMixin:
         trade['origin'] = 'exit' if proposal.get('exit_reason') else proposal.get('origin', 'ai')
         if proposal.get('reused'):
             trade['reused'] = True
+        origin_run = next((r for r in state.get('runs') or [] if r.get('id') == proposal.get('run_id')), None)
+        if proposal['side'] == 'BUY' and origin_run and origin_run.get('evidence'):
+            trade['evidence'] = origin_run['evidence'].get('sign')
         if proposal['side'] != 'BUY':
             if proposal.get('exit_reason') and symbol not in state['positions']:
                 afterexit.record(state, symbol, proposal.get('position'), trade, proposal['exit_reason'])
@@ -302,6 +312,7 @@ class DeskMixin:
                    take_profit_price=min(pos.get('take_profit_price', math.inf), sizing['take_profit_price']),
                    expires_at=min(pos.get('expires_at', math.inf), sizing['expires_at']))
         if horizon == 'month':
+            pos.setdefault('exit_mode', (state.get('strategy_settings') or {}).get('exit_mode', 'target'))
             stop_pct = proposal.get('stop_loss_pct')
             if isinstance(stop_pct, (int, float)) and stop_pct > 0:
                 pos['trail_pct'] = min(pos.get('trail_pct') or stop_pct, stop_pct)
@@ -358,6 +369,9 @@ class DeskMixin:
                     month = pos.get('horizon') == 'month'
                     if month:
                         self.trail(pos, q)
+                        if pos.get('exit_mode') == 'trail' and not pos.get('target_hit') and q['bid'] >= pos['take_profit_price']:
+                            pos['target_hit'] = time.time()
+                            event(s, f'{SYMBOLS[symbol]["name"]} 목표가 도달 · 팔지 않고 추적 손절(최고가 −{pos.get("trail_pct")}%)로 계속 보유합니다.')
                     # An unrelated quote failure can prevent refresh() from expiring
                     # proposals. A fresh exit quote must still replace an expired one.
                     for pending in s['proposals']:
@@ -369,7 +383,7 @@ class DeskMixin:
                         reason = '일일 손실 한도'
                     elif q['bid'] <= pos['stop_price']:
                         reason = '추적 손절(이익 보호)' if pos.get('trailing') else '손절 조건'
-                    elif q['bid'] >= pos['take_profit_price']:
+                    elif q['bid'] >= pos['take_profit_price'] and pos.get('exit_mode') != 'trail':
                         reason = '익절 조건'
                     elif now >= pos['expires_at']:
                         reason = '최대 보유시간'
@@ -762,6 +776,7 @@ class DeskMixin:
                               'selected_by': 'ai' if selection else ('user' if symbol == requested else 'server')})
             account = copy.deepcopy(s)
         context = market_context(symbol, quote, candles, account)
+        evidence_note = None
         context.update(strategy_mode='intraday', candle_interval='1m', intraday_candles=candles, strategy_settings=account['strategy_settings'],
                        instrument=SYMBOLS[symbol],
                        portfolio={'cash': account['cash'], 'positions': account['positions'], 'risk_status': account.get('risk_status', {})},
@@ -774,6 +789,10 @@ class DeskMixin:
             context['intraday'] = history.minute_block(candles)
             context.pop('candles', None)
             context.pop('intraday_candles', None)
+            if self.uses_evidence(account):
+                pack, fired = self.evidence.get(symbol), (verdicts.get(symbol) or {}).get('rules') or []
+                context['evidence'] = evidence.for_ai(pack, fired)
+                evidence_note = evidence.summary(pack, fired)
         context['market_intel'] = self.intel.features(symbol, SYMBOLS[symbol]['market'])
         previous = self.previous_note(account, symbol, time.time(), quote)
         if previous:
@@ -852,6 +871,8 @@ class DeskMixin:
                 return
             run = next(x for x in s['runs'] if x['id'] == run_id)
             run['status'] = 'completed'
+            if evidence_note:
+                run['evidence'] = evidence_note
             tracked = s.setdefault('pacing', {})
             tracked['samples'], tracked['cost_pct'] = pacing.learn(tracked.get('samples'), usage_before, usage_after)
             s['scheduler_status'] = '조사·반대 검토·최종 판단 완료 · 청산 규칙은 별도로 감시합니다.'
@@ -861,7 +882,7 @@ class DeskMixin:
                 selected_by=run.get('selected_by', 'server'), now=time.time(),
                 rules=(verdicts.get(symbol) or {}).get('signals') if month else signals(candles),
                 horizon='month' if month else 'intraday', reused=found is not None,
-                trigger_side=self.trigger_side(verdicts.get(symbol)) if month else None,
+                trigger_side=self.trigger_side(verdicts.get(symbol)) if month else None, evidence=evidence_note,
                 cost_bps=self.trade_cost_bps(symbol, fresh))
             self.plan_entry(s, symbol, decision, fresh, run, gen, time.time())
             if decision['stance'] == 'HOLD' or s['revision'] != rev:

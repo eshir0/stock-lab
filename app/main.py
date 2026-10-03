@@ -92,7 +92,8 @@ def create_app(config=None, background=True, test=False):
                 raise
             except Exception:
                 pass
-            for job in (engine.refresh_benchmark, engine.check_providers, engine.notify):
+            for job in (engine.refresh_benchmark, engine.credit_dividends, engine.settle_fx, engine.lock_verdict, engine.check_providers,
+                        engine.notify):
                 try:
                     await asyncio.to_thread(job)
                 except asyncio.CancelledError:
@@ -322,6 +323,9 @@ def create_app(config=None, background=True, test=False):
         risk_per_trade_pct: float = Field(default=.5, ge=.1, le=2, allow_inf_nan=False, strict=True)
         daily_loss_limit_pct: float = Field(default=2, ge=1, le=10, allow_inf_nan=False, strict=True)
         max_holding_minutes: int | None = Field(default=None, ge=15, le=43200, strict=True)
+        exit_mode: Literal['target', 'trail'] = 'trail'
+        signal_filter: Literal['all', 'research'] = 'research'
+        evidence: Literal['on', 'off'] = 'on'
         confirmation: str
 
     @app.post('/api/experiments')
@@ -334,6 +338,8 @@ def create_app(config=None, background=True, test=False):
                                       strategy_mode=data.strategy_mode, strategy_settings={
                                           'include_leveraged_etfs': data.include_leveraged_etfs,
                                           'universe_mode': data.universe_mode, 'horizon': data.horizon,
+                                          'exit_mode': data.exit_mode, 'signal_filter': data.signal_filter,
+                                          'evidence': data.evidence,
                                           'max_position_pct': (data.max_position_pct if data.max_position_pct is not None
                                                                else 30),
                                           'risk_per_trade_pct': data.risk_per_trade_pct,

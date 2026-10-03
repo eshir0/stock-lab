@@ -256,3 +256,60 @@ def test_the_bridge_refuses_an_unknown_tier_and_passes_a_known_one_through(monke
     assert ai_bridge.generate({'provider': 'claude', 'system': 's', 'prompt': 'p', 'schema': {}, 'tier': 'light'})[0] == 200
     assert ai_bridge.generate({'provider': 'claude', 'system': 's', 'prompt': 'p', 'schema': {}})[0] == 200
     assert seen == ['light', '']
+
+
+def test_a_probe_passes_the_cooldown_and_an_answer_ends_it(monkeypatch):
+    monkeypatch.setattr(ai_bridge, '_cooldown', {'codex': ai_bridge.time.time()+600})
+    monkeypatch.setattr(ai_bridge, 'save_state', lambda: None)
+    monkeypatch.setattr(ai_bridge, 'load_env', lambda: {})
+    monkeypatch.setitem(ai_bridge.RUNNERS, 'codex', lambda *a: {'data': {'ok': True}, 'model': 'codex/x'})
+    _, body = ai_bridge.generate({'provider': 'codex', 'system': 's', 'prompt': 'p', 'schema': {}, 'probe': True})
+    assert body['ok'] and not ai_bridge.cooling('codex')
+
+
+def test_a_failed_probe_keeps_the_cooldown(monkeypatch):
+    until = ai_bridge.time.time()+600
+    monkeypatch.setattr(ai_bridge, '_cooldown', {'codex': until})
+    monkeypatch.setattr(ai_bridge, 'save_state', lambda: None)
+    monkeypatch.setattr(ai_bridge, 'load_env', lambda: {})
+    def still(*a):
+        raise ai_bridge.Exhausted('소진', until+3600)
+    monkeypatch.setitem(ai_bridge.RUNNERS, 'codex', still)
+    _, body = ai_bridge.generate({'provider': 'codex', 'system': 's', 'prompt': 'p', 'schema': {}, 'probe': True})
+    assert body['exhausted'] and ai_bridge.cooling('codex') >= until
+
+
+# ---- direct usage readings (2026-10-03) -----------------------------------------------------------------------------------------
+
+CODEX_BODY = {'plan_type': 'plus', 'rate_limit': {'allowed': True, 'limit_reached': False,
+              'primary_window': {'used_percent': 2, 'limit_window_seconds': 18000, 'reset_at': 1791007249},
+              'secondary_window': {'used_percent': 0, 'limit_window_seconds': 604800, 'reset_at': 1791594049}}}
+CLAUDE_BODY = {'five_hour': {'utilization': 63.0, 'resets_at': '2026-10-03T04:00:00.660986+00:00'},
+               'seven_day': {'utilization': 9.0, 'resets_at': '2026-10-06T21:00:00.661009+00:00'}, 'seven_day_opus': None}
+
+
+def test_the_usage_payloads_become_readings():
+    codex = ai_bridge.codex_reading(CODEX_BODY)
+    assert codex['windows'] == {'five_hour': {'utilization': .02, 'resets_at': 1791007249},
+                                'seven_day': {'utilization': 0.0, 'resets_at': 1791594049}} and codex['status'] == 'allowed'
+    claude = ai_bridge.claude_reading(CLAUDE_BODY)
+    assert claude['windows']['five_hour']['utilization'] == .63
+    assert claude['windows']['seven_day']['resets_at'] == pytest.approx(1791320400.661009)
+    assert ai_bridge.codex_reading({'rate_limit': None}) is None and ai_bridge.claude_reading({}) is None
+    assert ai_bridge.codex_reading('x') is None and ai_bridge.claude_reading(None) is None
+
+
+def test_room_again_ends_a_cooldown_and_a_full_window_starts_one(monkeypatch):
+    monkeypatch.setattr(ai_bridge, 'save_state', lambda: None)
+    monkeypatch.setattr(ai_bridge, '_usage', {})
+    now = ai_bridge.time.time()
+    monkeypatch.setattr(ai_bridge, '_cooldown', {'codex': now+9000})
+    ai_bridge.apply_direct({'codex': ai_bridge.codex_reading(CODEX_BODY)})
+    assert not ai_bridge.cooling('codex') and ai_bridge._usage['codex']['windows']['five_hour']['utilization'] == .02
+    full = {'rate_limit': {'limit_reached': True, 'primary_window': {'used_percent': 100, 'reset_at': now+3600}}}
+    ai_bridge.apply_direct({'codex': ai_bridge.codex_reading(full)})
+    assert ai_bridge.cooling('codex') == pytest.approx(now+3600)
+
+
+def test_read_direct_survives_missing_logins(tmp_path):
+    assert ai_bridge.read_direct(home=str(tmp_path)) == {}

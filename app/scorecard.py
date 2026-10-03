@@ -8,6 +8,7 @@ of it. `benchmark_entry` follows an index ETF bought at the start of the experim
 Pure functions over plain dicts; nothing here trades or calls a service.
 """
 import math
+import time
 from decimal import Decimal
 
 from . import shares
@@ -55,14 +56,20 @@ def _close(trip, when):
     return {'symbol': trip['symbol'], 'name': trip['name'], 'currency': trip['currency'], 'opened': trip['opened'],
             'closed': when, 'days': round((when-trip['opened'])/86400, 2), 'pnl': round(float(pnl), 2),
             'return_pct': round(float(pnl/invested*100), 4) if invested > 0 else 0.0, 'leveraged': trip['leveraged'],
-            'origin': trip['origin'], 'reused': trip['reused'], 'exit_reason': trip.get('exit_reason', '')}
+            'origin': trip['origin'], 'reused': trip['reused'], 'exit_reason': trip.get('exit_reason', ''),
+            'evidence': trip.get('evidence')}
 
 
-def round_trips(trades):
+def round_trips(trades, dividends=()):
     """(closed round trips, open ones), oldest first, built from the ledger's fills. A sell without a recorded buy is ignored."""
     holding, closed = {}, []
-    for t in sorted(trades, key=lambda x: x.get('time', 0)):
+    events = [dict(t) for t in trades]+[dict(d, side='DIVIDEND') for d in dividends or ()]
+    for t in sorted(events, key=lambda x: (x.get('time', 0), x.get('side') == 'DIVIDEND')):
         symbol, side = t.get('symbol'), t.get('side')
+        if side == 'DIVIDEND':
+            if symbol in holding:
+                holding[symbol]['pnl'] += Decimal(str(t.get('net') or 0))     # cash after withholding, part of this trade's result
+            continue
         if symbol not in SYMBOLS or side not in ('BUY', 'SELL'):
             continue
         qty = shares.dec(t['quantity'])
@@ -73,7 +80,7 @@ def round_trips(trades):
                 trip = holding[symbol] = {'symbol': symbol, 'name': item['name'], 'currency': item['currency'],
                                           'opened': t['time'], 'held': Decimal(0), 'invested': Decimal(0), 'pnl': Decimal(0),
                                           'leveraged': bool(item.get('leveraged_etf')), 'origin': _origin(t),
-                                          'reused': bool(t.get('reused'))}
+                                          'reused': bool(t.get('reused')), 'evidence': t.get('evidence')}
             trip['held'] += qty
             trip['invested'] += Decimal(str(t['price']))*qty+Decimal(str(t.get('fee') or 0))
         elif trip is not None:
@@ -98,10 +105,36 @@ def group(trips):
             'expectancy_pct': mean, 'ci_pct': [low, high] if low is not None else None}
 
 
-def report(trades):
+US_TAX_RATE, US_TAX_ALLOWANCE_KRW = .22, 2_500_000     # Korea: overseas stock gains 22% (incl. local tax) above 2.5M KRW a year
+
+
+def us_capital_gains_tax(trades, usdkrw, now):
+    """What this year's realized US gains would cost in Korean tax if they were real: (gains in KRW - 2.5M) x 22%. An estimate
+    for the owner only - the real figure nets every overseas trade of the year and uses each sale's exchange rate."""
+    year = time.strftime('%Y', time.localtime(now))
+    gains = sum(float(t.get('realized') or 0) for t in trades
+                if t.get('side') == 'SELL' and t.get('currency') == 'USD' and time.strftime('%Y', time.localtime(t.get('time', 0))) == year)
+    if not usdkrw:
+        return {'year': year, 'realized_usd': round(gains, 2), 'usdkrw': None, 'tax_krw': None}
+    krw = gains*usdkrw
+    return {'year': year, 'realized_usd': round(gains, 2), 'usdkrw': round(usdkrw, 2), 'realized_krw': round(krw),
+            'tax_krw': round(max(0.0, krw-US_TAX_ALLOWANCE_KRW)*US_TAX_RATE)}
+
+
+def dividend_summary(dividends):
+    out = {}
+    for d in dividends or []:
+        row = out.setdefault(d['currency'], {'count': 0, 'gross': 0.0, 'tax': 0.0, 'net': 0.0})
+        row['count'] += 1
+        for k in ('gross', 'tax', 'net'):
+            row[k] = round(row[k]+float(d[k]), 2)
+    return out
+
+
+def report(trades, dividends=()):
     """The trade report card. Returns are per round trip in percent of what was invested (fees and taxes included); a round
     trip that ends exactly even counts as a loss."""
-    closed, holding = round_trips(trades)
+    closed, holding = round_trips(trades, dividends)
     returns = [t['return_pct'] for t in closed]
     wins, losses = [r for r in returns if r > 0], [r for r in returns if r <= 0]
     base = group(closed)
@@ -122,7 +155,10 @@ def report(trades):
                        'watch': group([t for t in closed if t['origin'] == 'watch']),
                        'analysis': group([t for t in closed if t['origin'] != 'watch']),
                        'reused': group([t for t in closed if t['reused']]),
-                       'fresh': group([t for t in closed if not t['reused']])},
+                       'fresh': group([t for t in closed if not t['reused']]),
+                       'evidence_for': group([t for t in closed if t.get('evidence') == 'for']),
+                       'evidence_against': group([t for t in closed if t.get('evidence') == 'against']),
+                       'evidence_mixed': group([t for t in closed if t.get('evidence') in ('mixed', 'none')])},
             'recent': closed[-RECENT:][::-1]}
 
 

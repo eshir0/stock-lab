@@ -102,12 +102,19 @@
 <p class="eyebrow">NEW EXPERIMENT</p><h2>가상 원금으로 새 실험 만들기</h2>
 <p>현재 실험의 잔고·보유 종목·거래 기록을 종료 시점 그대로 보관합니다. 보유 종목을 매도하지 않으며 새 실험으로 넘기지 않습니다.</p>
 <label class="field-label" for="experiment-input-name">실험 이름</label><input id="experiment-input-name" name="name" maxlength="80" placeholder="예: 1개월 스윙 실험 1차" required>
-<div class="seed-inputs"><div><label class="field-label" for="seed-krw">국내 가상 원금 · 원</label><input id="seed-krw" name="seed_krw" type="number" min="0" max="1000000000000" step="1" value="10000000" required inputmode="numeric"></div><div><label class="field-label" for="seed-usd">미국 가상 원금 · 달러</label><input id="seed-usd" name="seed_usd" type="number" min="0" max="1000000000" step="0.01" value="10000" required inputmode="decimal"></div></div>
+<div class="seed-inputs"><div><label class="field-label" for="seed-krw">국내 가상 원금 · 원</label><input id="seed-krw" name="seed_krw" type="number" min="0" max="1000000000000" step="1" value="7000000" required inputmode="numeric"></div><div><label class="field-label" for="seed-usd">미국 가상 원금 · 달러</label><input id="seed-usd" name="seed_usd" type="number" min="0" max="1000000000" step="0.01" value="750" required inputmode="decimal"></div></div>
+<p class="muted small">기본값은 시장별 최소 권장 원금입니다. 국내 700만 원: 1주 단위라 이보다 적으면 집중 종목 16개 중 살 수 있는 종목이 10~11개로 줄고 대부분 1주(1,000만 원이면 종목당 3주 안팎). 미국 750달러(약 100만 원): 소수점 거래라 모든 종목을 살 수 있고 종목당 최소 약 50달러. 두 시장의 성과를 따로 보고 한 곳을 고르는 용도입니다.</p>
 <label class="field-label" for="strategy-mode">분석 전략</label><select id="strategy-mode" name="strategy_mode"><option value="intraday">전문가팀 · 종목 선정과 위험 관리</option><option value="legacy">기본 분석 · 기존 방식</option></select>
 <p id="strategy-form-description" class="muted small">플래너 → 기업·차트·뉴스 조사 → 반대 검토 → 디렉터 순서로 분석하고, 목표 비중과 손절 위험을 바탕으로 수량을 정합니다.</p>
 <fieldset id="intraday-settings" class="strategy-fields"><legend>매매 기간과 위험 기준</legend>
 <label class="field-label" for="horizon">투자 기간</label><select id="horizon" name="horizon"><option value="month">1개월 스윙 · 최대 30일 보유, 밤새 보유</option></select>
 <p id="horizon-description" class="muted small"></p>
+<label class="field-label" for="evidence-mode">과거 근거</label><select id="evidence-mode" name="evidence"><option value="on">AI 분석에 과거 20년 근거 묶음 제공 (추천)</option><option value="off">제공하지 않음</option></select>
+<p class="muted small">매일 장 마감 뒤 서버가 계산한 신호별 과거 성적, 이 종목의 과거 결과, 비슷한 상황의 결과, 시장 상황, 재무·공시를 분석팀이 근거로 인용합니다.</p>
+<label class="field-label" for="signal-filter">매수 신호</label><select id="signal-filter" name="signal_filter"><option value="research">과거 20년 연구로 거른 신호만 (추천)</option><option value="all">규칙 신호 4종 모두</option></select>
+<p class="muted small">2006~2018년과 2019~2026년 모두 손실이었던 신호는 AI를 부르지 않습니다: 국내 개별 주식의 골든크로스·모멘텀·돌파, 미국 개별 주식의 모멘텀·돌파, 미국 ETF의 돌파. 보유 종목의 매도 신호는 그대로입니다.</p>
+<label class="field-label" for="exit-mode">익절 방식</label><select id="exit-mode" name="exit_mode"><option value="trail">추적 손절로 계속 · 목표가에서 팔지 않음 (추천)</option><option value="target">목표가에 전량 익절</option></select>
+<p class="muted small">2006~2026년 미국·국내 약 70만 건 백테스트에서 "추적 손절로 계속"이 거래당 평균 0.05~0.12%p 나았습니다(상승장에서 차이가 크고, 일부 약세 구간은 비슷하거나 불리).</p>
 <label class="checkbox-label" for="include-leveraged-etfs"><input id="include-leveraged-etfs" name="include_leveraged_etfs" type="checkbox"><span>레버리지·인버스 ETF를 관심종목에 포함</span></label>
 <p class="muted small">ETF 자체의 시세로 모의매매합니다. 계좌에서 돈을 빌리거나 주식을 공매도하지 않습니다.</p>
 <label class="field-label" for="universe-mode">종목 구성 방식</label><select id="universe-mode" name="universe_mode"><option value="daily_focus">일일 집중 종목 (권장) · 매일 아침 데이터와 뉴스로 시장별 선정 (상승 추세 종목 위주)</option><option value="fixed">고정 종목 · 삼성전자·SK하이닉스·Apple·Microsoft와 레버리지 ETF</option></select>

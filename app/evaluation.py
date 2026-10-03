@@ -34,7 +34,7 @@ def expected(entry):
 
 
 def record_decision(s, *, run_id, symbol, market, decision, quote, candidates, selected_by, cost_bps, now, rules=None,
-                    horizon='intraday', reused=False, trigger_side=None):
+                    horizon='intraday', reused=False, trigger_side=None, evidence=None):
     price = mid(quote)
     if price is None:
         return None
@@ -43,6 +43,8 @@ def record_decision(s, *, run_id, symbol, market, decision, quote, candidates, s
              'engine': str(decision.get('engine') or ''), 'selected_by': selected_by, 'action': 'hold',
              'price': price, 'session_end': quote.get('session_end'), 'cost_bps': round(cost_bps, 2),
              'candidates': {k: v for k, v in candidates.items() if v}, 'rules': dict(rules or {}), 'outcomes': {}}
+    if evidence:
+        entry['evidence'] = evidence              # the archive's verdict on the triggering rules (evidence.summary)
     if reused:
         entry['reused'] = True                    # the analysis reused earlier research (reuse.py)
     if trigger_side in ('BUY', 'SELL'):

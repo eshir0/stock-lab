@@ -166,10 +166,13 @@ $('execution-dialog').addEventListener('close', async () => {
 $('experiment-open').onclick = () => {
   $('experiment-error').textContent = '';
   $('experiment-input-name').value = '모의투자 ' + new Date().toLocaleDateString('ko-KR');
-  $('seed-krw').value = '10000000';
-  $('seed-usd').value = '10000';
+  $('seed-krw').value = '7000000';
+  $('seed-usd').value = '750';
   $('strategy-mode').value = 'intraday';
   $('include-leveraged-etfs').checked = false;
+  $('exit-mode').value = 'trail';
+  $('signal-filter').value = 'research';
+  $('evidence-mode').value = 'on';
   $('universe-mode').value = 'daily_focus';
   $('risk-per-trade').value = '0.5';
   $('daily-loss-limit').value = '2';
@@ -205,7 +208,7 @@ $('experiment-form').addEventListener('submit', async e => {
   const seed_krw = Number($('seed-krw').value), seed_usd = Number($('seed-usd').value), max_order_pct = Number($('max-order-pct').value), max_position_pct = Number($('max-position-pct').value);
   const strategy_mode = $('strategy-mode').value;
   const horizon = $('horizon').value, span = horizons[horizon] || horizons.month, holdingInput = Number($('max-holding').value);
-  const settings = {include_leveraged_etfs:$('include-leveraged-etfs').checked,risk_per_trade_pct:Number($('risk-per-trade').value),daily_loss_limit_pct:Number($('daily-loss-limit').value),horizon,max_holding_minutes:holdingInput * span.unit};
+  const settings = {include_leveraged_etfs:$('include-leveraged-etfs').checked,risk_per_trade_pct:Number($('risk-per-trade').value),daily_loss_limit_pct:Number($('daily-loss-limit').value),horizon,max_holding_minutes:holdingInput * span.unit,exit_mode:$('exit-mode').value,signal_filter:$('signal-filter').value,evidence:$('evidence-mode').value};
   if (!name || ![seed_krw,seed_usd,max_order_pct].every(Number.isFinite) || seed_krw < 0 || seed_usd < 0 || seed_krw + seed_usd <= 0 || max_order_pct < 1 || max_order_pct > 100 || !Number.isFinite(max_position_pct) || max_position_pct < 10 || max_position_pct > 100) {
     $('experiment-error').textContent = '실험 이름과 원금을 확인해 주세요. 최소 한 통화의 원금은 0보다 커야 하고, 1회 매수 한도는 1~100%, 종목당 최대 비중은 10~100%입니다.';
     return;
@@ -266,6 +269,12 @@ function renderPerformance(s, c, id) {
     ['누적 매매비용',number(p.costs,c),''],
     ['최대 낙폭',finite(p.max_drawdown_pct) ? p.max_drawdown_pct.toFixed(2) + '%' : '—','']
   ];
+  const f = c === 'USD' ? s.fx_view : null;
+  if (f) rows.push(
+    ['원화 투입', `${number(f.krw_cost,'KRW')} (환율 ${f.start_rate.toLocaleString()}원)`, ''],
+    ['원화 환산 평가', `${number(f.krw_value,'KRW')} (지금 ${f.rate.toLocaleString()}원)`, ''],
+    ['원화 기준 손익', `${number(f.krw_pnl,'KRW')} · 주가 ${number(f.from_stocks_krw,'KRW')} · 환율 ${number(f.from_rate_krw,'KRW')}`, f.krw_pnl >= 0 ? 'gain' : 'loss']);
+  else if (c === 'USD' && s.fx?.pending) rows.push(['원화 환산', '환율을 읽는 중입니다', 'muted']);
   setHtml('performance-' + id, rows.map(([title,value,cls]) => `<div><dt>${title}</dt><dd class="${cls}">${value}</dd></div>`).join(''));
   const note = [];
   if (p.valuation_fresh === false) note.push('시세 확인 필요 · 마지막 가격 기준');
@@ -360,7 +369,7 @@ function render() {
     const i = s.instruments.find(i => i.symbol === symbol), q = s.quotes[symbol], pnl = q ? q.last * p.quantity - (p.cost_basis ?? p.average * p.quantity) : null;
     const currency = i?.currency || p.currency;
     const thesis = p.entry_thesis ? `<div class="entry-thesis" title="${esc(p.entry_thesis)}">${esc(p.entry_thesis)}</div>` : '';
-    return `<tr><td>${esc(i?.name || symbol)}${thesis}</td><td>${p.quantity}주</td><td>${number(p.average,currency)}</td><td class="${pnl === null ? 'muted' : pnl >= 0 ? 'gain' : 'loss'}">${pnl === null ? '시세 대기' : number(pnl,currency)}</td><td>${number(p.stop_price,currency)}${p.trailing ? '<span class="trail-tag">추적 중</span>' : ''}</td><td>${number(p.take_profit_price,currency)}</td><td>${p.expires_at ? dateTime(p.expires_at) + (!s.running ? '<span class="monitor-off">감시 중지</span>' : p.expires_at <= now ? '<span class="monitor-off">기한 도달 · 청산 대기</span>' : '') : '—'}</td></tr>`;
+    return `<tr><td>${esc(i?.name || symbol)}${thesis}</td><td>${p.quantity}주</td><td>${number(p.average,currency)}</td><td class="${pnl === null ? 'muted' : pnl >= 0 ? 'gain' : 'loss'}">${pnl === null ? '시세 대기' : number(pnl,currency)}</td><td>${number(p.stop_price,currency)}${p.trailing ? '<span class="trail-tag">추적 중</span>' : ''}</td><td>${number(p.take_profit_price,currency)}${p.exit_mode === 'trail' ? `<span class="trail-tag">${p.target_hit ? '목표 넘음 · 추적' : '팔지 않음'}</span>` : ''}</td><td>${p.expires_at ? dateTime(p.expires_at) + (!s.running ? '<span class="monitor-off">감시 중지</span>' : p.expires_at <= now ? '<span class="monitor-off">기한 도달 · 청산 대기</span>' : '') : '—'}</td></tr>`;
   }).join('') || '<tr><td colspan="7" class="empty-cell">아직 보유한 종목이 없습니다.</td></tr>');
   setHtml('events', s.events.slice(-15).reverse().map(e => `<div class="event ${e.level === 'warning' ? 'warning' : ''}"><time>${clock(e.time)}</time><p>${esc(e.message)}</p></div>`).join(''));
   setHtml('trades', s.trades.slice().reverse().map(t => `<tr><td>${dateTime(t.time)}</td><td>${esc(s.instruments.find(i => i.symbol === t.symbol)?.name || t.symbol)}</td><td>${t.side === 'BUY' ? '매수' : '매도'}</td><td>${t.liquidation || t.execution_mode === 'liquidation' ? '전량매도' : t.entry_watch ? (t.execution_mode === 'auto' ? '조건 진입' : '조건 진입 · 승인') : t.execution_mode === 'auto' ? '자동' : '직접 승인'}</td><td>${t.quantity}주</td><td>${number(t.price,t.currency)}</td><td>${number(t.fee,t.currency)}</td><td class="${t.realized >= 0 ? 'gain' : 'loss'}">${t.side === 'SELL' ? number(t.realized,t.currency) : '—'}</td><td>${esc(t.exit_reason ? exitNames[t.exit_reason] || t.exit_reason : '—')}</td></tr>`).join('') || '<tr><td colspan="9" class="empty-cell">모의매매가 체결되면 이곳에 기록됩니다.</td></tr>');
@@ -460,13 +469,13 @@ function renderIntel(s) {
   parts.push(`국내 수급 ${it.flows.count}/${it.flows.tried}종목`);
   $('intel-status').textContent = '토스 공식 시장 정보 · ' + parts.join(' · ');
 }
-const gateReasons = {signal:'규칙 신호', requested:'직접 요청', no_signal:'신호 없음', recent:'최근 분석함', no_data:'일봉 부족'};
+const gateReasons = {signal:'규칙 신호', requested:'직접 요청', no_signal:'신호 없음', recent:'최근 분석함', no_data:'일봉 부족', filtered:'연구로 제외한 신호뿐'};
 function renderGate(s) {
   const g = s.desk_gate || {}, scan = s.desk_scan || {}, month = s.strategy_mode === 'intraday' && s.strategy_settings?.horizon === 'month', show = month && !!(g.time || scan.time);
   $('gate-status').hidden = !show;
   if (!show) return;
   const nameOf = symbol => s.instruments.find(i => i.symbol === symbol)?.name || symbol;
-  const list = (g.checked || []).map(c => `${c.name} ${gateReasons[c.reason] || c.reason}${c.detail ? '(' + c.detail + ')' : c.rules?.length && c.reason !== 'no_signal' ? '(' + c.rules.map(r => ruleNames[r] || r).join('·') + ')' : ''}`).join(' · ');
+  const list = (g.checked || []).map(c => `${c.name} ${gateReasons[c.reason] || c.reason}${c.detail ? '(' + c.detail + ')' : c.reason === 'filtered' && c.filtered?.length ? '(' + c.filtered.map(r => ruleNames[r] || r).join('·') + ')' : c.rules?.length && c.reason !== 'no_signal' ? '(' + c.rules.map(r => ruleNames[r] || r).join('·') + ')' : ''}`).join(' · ');
   const skipped = Object.entries(scan.skipped || {}).map(([symbol, why]) => `${nameOf(symbol)}(${why})`).join(' · ');
   const repairs = Object.entries(scan.repairs || {}).map(([key, n]) => `${nameOf(key.split(':')[0])} ${key.endsWith(':1d') ? '일봉' : '분봉'} ${n.repaired}개 보정${n.dropped ? '·' + n.dropped + '개 제외' : ''}`).join(' · ');
   $('gate-status').textContent = (g.time ? `규칙 신호 확인 ${clock(g.time)} · ${list || '확인한 종목 없음'} · AI 호출을 건너뛴 사이클 ${g.skipped_cycles || 0}회` : '규칙 신호 확인 전')
@@ -589,28 +598,37 @@ function renderVerification(s) {
     return;
   }
   const [cls, label] = verifyStatus[v.status] || verifyStatus.collecting;
+  const off = v.official, [ocls, olabel] = off ? (verifyStatus[off.status] || verifyStatus.collecting) : [];
+  const officialHtml = off ? `<p class="verify-warn">공식 판정: <b>${olabel}</b> (${dateTime(off.time)} 표본이 처음 다 찼을 때 고정). 아래는 그 뒤 계속 쌓인 데이터의 참고 계산이며, 운이 좋은 구간에 '통과'가 보일 수 있어 공식 판정을 바꾸지 않습니다.</p>` : '';
   const bars = v.progress.map(p => {
     const w = p.target > 0 ? Math.max(0, Math.min(100, Math.round(p.value / p.target * 100))) : 0;
     return `<div class="verify-progress"><span>${esc(p.label)}</span><div class="verify-bar" aria-hidden="true"><span class="verify-fill" data-w="${w}"></span></div><b>${esc(p.value)} / ${esc(p.target)}${esc(p.unit)}</b></div>`;
   }).join('');
   const checks = v.checks.map(c => `<li class="verify-check ${c.ok === true ? 'ok' : c.ok === false ? 'bad' : 'wait'}"><b>${c.ok === true ? '통과' : c.ok === false ? '미달' : '대기'}</b><span>${esc(c.label)}<small>${esc(c.detail)}</small></span></li>`).join('');
   const g = r.groups || {};
-  const rows = [['AI 분석 매수', g.analysis], ['조건 진입', g.watch], ['조사 재사용', g.reused], ['새 조사', g.fresh], ['레버리지 ETF', g.leveraged], ['레버리지 제외', g.plain]]
+  const rows = [['AI 분석 매수', g.analysis], ['조건 진입', g.watch], ['조사 재사용', g.reused], ['새 조사', g.fresh], ['레버리지 ETF', g.leveraged], ['레버리지 제외', g.plain], ['과거 근거 우호적', g.evidence_for], ['과거 근거 불리', g.evidence_against], ['과거 근거 엇갈림·없음', g.evidence_mixed]]
     .filter(([, x]) => x && x.count).map(([name, x]) => `<tr><td>${name}</td><td>${x.count}건</td><td>${finite(x.win_rate_pct) ? x.win_rate_pct.toFixed(0) + '%' : '—'}</td><td>${pct(x.expectancy_pct)}</td><td>${x.ci_pct ? pct(x.ci_pct[0]) + ' ~ ' + pct(x.ci_pct[1]) : '—'}</td></tr>`).join('');
   const booked = Object.entries(r.pnl || {}).map(([cy, value]) => number(value, cy)).join(' · ') || '—';
   const stats = r.closed ? `<dl class="verify-stats"><div><dt>승률</dt><dd>${finite(r.win_rate_pct) ? r.win_rate_pct.toFixed(0) + '%' : '—'} (${r.wins}승 ${r.losses}패)</dd></div><div><dt>평균 이익 / 손실</dt><dd>${pct(r.avg_win_pct)} / ${pct(r.avg_loss_pct)}</dd></div><div><dt>손익비</dt><dd>${finite(r.payoff) ? r.payoff.toFixed(2) : '—'}</dd></div><div><dt>거래당 기대값</dt><dd>${pct(r.expectancy_pct)}${r.ci_pct ? ` <small>(95% ${pct(r.ci_pct[0])} ~ ${pct(r.ci_pct[1])})</small>` : ''}</dd></div><div><dt>수익 팩터</dt><dd>${finite(r.profit_factor) ? r.profit_factor.toFixed(2) : '—'}</dd></div><div><dt>평균 보유</dt><dd>${finite(r.avg_days) ? r.avg_days.toFixed(1) + '일' : '—'}</dd></div><div><dt>실현 손익</dt><dd>${booked}</dd></div></dl>`
     : '<p class="small muted">청산된 거래가 아직 없습니다. 거래가 끝나면 수수료·세금을 뺀 실제 장부 기준으로 계산합니다.</p>';
   const index = ['KRW', 'USD'].filter(cy => bench[cy]).map(cy => `${esc(bench[cy].name)} ${pct(bench[cy].return_pct)} (최대 낙폭 ${finite(bench[cy].max_drawdown_pct) ? bench[cy].max_drawdown_pct.toFixed(1) : '—'}%)`).join(' · ');
   const a = v.ai_vs_rule;
-  setHtml('verify-panel', `<div class="verify-head"><h3>검증 계획</h3><span class="verify-status ${cls}">${label}</span></div>`
+  setHtml('verify-panel', `<div class="verify-head"><h3>검증 계획</h3><span class="verify-status ${off ? ocls : cls}">${off ? '공식 · ' + olabel : label}</span></div>` + officialHtml
     + `<p class="small muted">${dateTime(v.started_at)}에 고정한 기준입니다. 기간과 표본이 모두 차기 전에는 판정하지 않고, 통과해도 실거래가 켜지지 않습니다.</p>`
     + (v.strategy_changed ? '<p class="verify-warn">검증을 시작한 뒤 전략(프롬프트·규칙·한도·비용 가정)이 바뀌었습니다. 이 결과에는 두 전략이 섞여 있어 새 실험으로 다시 재야 합니다.</p>' : '')
     + `<div class="verify-grid">${bars}</div><ul class="verify-checks">${checks}</ul>`
     + `<p class="small muted verify-index">같은 기간 지수 ETF를 그냥 들고 있었다면: ${index || '지수 일봉을 읽는 중입니다'}</p>`
+    + realismHtml(s)
     + (a && a.count ? `<p class="small muted verify-index">AI 판단 vs 규칙대로(5거래일 뒤, ${a.count}건): AI ${pct(a.ai_avg_net_pct)} · 규칙대로 ${pct(a.rule_avg_net_pct)} · 차이 ${pct(a.diff_avg_pct)}${a.diff_ci_pct ? ` (95% ${pct(a.diff_ci_pct[0])} ~ ${pct(a.diff_ci_pct[1])})` : ''}</p>` : '')
     + `<h3 class="verify-sub">거래 성적표 <small class="muted">청산 ${r.closed || 0}건 · 보유 중 ${r.open || 0}건</small></h3>${stats}`
     + (rows ? `<div class="table-wrap"><table class="eval-table"><thead><tr><th>구분</th><th>거래</th><th>승률</th><th>거래당 기대값</th><th>95% 구간</th></tr></thead><tbody>${rows}</tbody></table></div>` : '')
     + afterExitHtml(s.after_exit, pct));
+}
+function realismHtml(s) {
+  const d = s.dividend_summary || {}, t = s.tax_estimate;
+  const div = Object.entries(d).map(([c, r]) => `${c} ${r.count}건 · 세전 ${number(r.gross, c)} → 원천징수 후 ${number(r.net, c)}`).join(' · ');
+  const tax = t && t.realized_usd ? `${t.year}년 미국 주식 실현 손익 ${number(t.realized_usd, 'USD')}${t.tax_krw === null ? ' (환율 대기)' : ` ≈ ${number(t.realized_krw, 'KRW')} → 양도세 추정 ${number(t.tax_krw, 'KRW')} (연 250만 원 공제 후 22%)`}` : '';
+  return `<p class="small muted verify-index">배당 입금: ${div || '아직 없음'}${tax ? ' · ' + tax : ''}. 국내 주식 양도 차익은 소액주주 비과세, 매도 거래세는 체결 때 이미 차감합니다.</p>`;
 }
 function afterExitHtml(x, pct) {
   const head = '<h3 class="verify-sub">판 뒤의 흐름 <small class="muted">참고 지표 · 매매 규칙은 바꾸지 않습니다</small></h3>';
@@ -650,7 +668,7 @@ function renderTeam(s) {
   const run = s.runs.at(-1), roles = roleList(s), intraday = s.strategy_mode === 'intraday';
   $('research-flow').textContent = intraday ? '플래너가 조사 지시 → 기업·차트·뉴스 분석가가 병렬 조사 → 반대 검토자가 약점 확인 → 디렉터가 매매 계획 결정' : '기업·차트·뉴스 분석 → 반대 검토 → 디렉터의 매매 의견';
   $('team').classList.toggle('six-roles',roles.length === 6);
-  $('team-context').textContent = run ? `${s.instruments.find(i => i.symbol === run.symbol)?.name || run.symbol} · ${clock(run.time)} · ${({running:'분석 중',completed:'분석 완료',cancelled:'중지됨',error:'확인 필요'})[run.status] || run.status}${run.reuse ? ` · 조사 ${run.reuse.age_minutes}분 전 자료 재사용(AI ${run.reuse.saved_calls}회 절약)` : ''}` : '실행하면 역할별 분석이 이곳에 쌓입니다.';
+  $('team-context').textContent = run ? `${s.instruments.find(i => i.symbol === run.symbol)?.name || run.symbol} · ${clock(run.time)} · ${({running:'분석 중',completed:'분석 완료',cancelled:'중지됨',error:'확인 필요'})[run.status] || run.status}${run.reuse ? ` · 조사 ${run.reuse.age_minutes}분 전 자료 재사용(AI ${run.reuse.saved_calls}회 절약)` : ''}${run.evidence ? ` · 과거 근거 ${({for:'우호적',against:'불리',mixed:'엇갈림',none:'없음'})[run.evidence.sign] || run.evidence.sign}${run.evidence.up || run.evidence.down ? `(플러스 ${run.evidence.up} · 마이너스 ${run.evidence.down})` : ''}` : ''}` : '실행하면 역할별 분석이 이곳에 쌓입니다.';
   setHtml('team', roles.map(({id:role,name},index) => {
     const done = run?.reports.find(r => r.role === role), active = run?.status === 'running' && (run.active_role === role || run.active_roles?.includes(role));
     return `<article class="agent ${active ? 'active' : done ? 'done' : ''}"><div class="agent-icon">${icon(roleIcons[role] || 'spark')}</div><span class="agent-no">0${index+1}</span><h3>${esc(name)}</h3><p>${active ? '분석 중…' : done ? (done.reused ? `재사용 · ${done.age_minutes}분 전` : '검토 완료') : run?.status === 'cancelled' ? '중지됨' : '대기 중'}</p></article>`;

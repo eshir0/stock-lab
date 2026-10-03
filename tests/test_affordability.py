@@ -144,3 +144,19 @@ def test_a_fallback_or_missing_list_is_left_alone(tmp_path):
     engine.refit_focus('US', 'x')
     assert 'afford' not in engine.store.read()['focus']['US']
     store.release()
+
+
+# ---- risk-based affordability (2026-10-03): a name whose single share risks more than one trade may lose is left out -------
+
+from app import universe as _u
+
+
+def test_one_share_must_fit_the_risk_per_trade():
+    item = {'currency': 'KRW'}
+    m = {'last': 1_841_000, 'atr_pct': 6.0}                                  # one share at a 6% stop risks 110,460
+    assert _u.unaffordable(m, item, {'KRW': 2_000_000}) == []                # the old check only looked at the price ...
+    assert _u.unaffordable(m, item, {'KRW': 2_000_000}, {'KRW': 15_000})     # ... a 3M account at 0.5% may lose 15,000
+    assert _u.unaffordable(m, item, {'KRW': 2_000_000}, {'KRW': 120_000}) == []    # a bigger account takes it again
+    cheap = {'last': 81_100, 'atr_pct': 1.0}                                 # the 2% floor applies: 1,622 per share
+    assert _u.unaffordable(cheap, item, {'KRW': 900_000}, {'KRW': 15_000}) == []
+    assert _u.unaffordable(m, {'currency': 'USD'}, None, {'KRW': 1}) == []   # other currencies and fractional shares: no check

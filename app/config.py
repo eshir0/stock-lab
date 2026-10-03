@@ -75,6 +75,8 @@ class Config:
     codex_model: str = os.getenv('CODEX_MODEL', '')
     # Phone notifications (notify.py): an ntfy topic URL or any endpoint taking a plain-text POST. Empty sends nothing.
     notify_url: str = os.getenv('NOTIFY_URL', '')
+    # Folder of daily evidence packs from the history archive (tools/data/evidence.py), mounted read-only. Empty = none.
+    evidence_dir: str = os.getenv('EVIDENCE_DIR', '')
     research_reuse_seconds: int = max(0, int(os.getenv('RESEARCH_REUSE_SECONDS', '3600')))
     research_reuse_move_pct: float = max(.1, float(os.getenv('RESEARCH_REUSE_MOVE_PCT', '1.5')))
     proposal_seconds: int = 180

@@ -156,7 +156,8 @@ class FocusMixin:
                 return
             budget = {c: self.position_cap(s, c) for c in ('KRW', 'USD') if not self.fractional(c)}
             entry['afford'] = {c: round(v, 2) for c, v in budget.items()}
-            fits = lambda p: not universe.unaffordable(p, p, budget)
+            risk = self.risk_budget(s)
+            fits = lambda p: not universe.unaffordable(p, p, budget, risk)
             ranked = entry.get('ranked') or []
             keep = [p for p in entry['picks'] if fits(p)]
             dropped = [p for p in entry['picks'] if not fits(p)]
@@ -172,7 +173,7 @@ class FocusMixin:
             known = {x['symbol'] for x in entry['excluded']}
             for p in ranked:
                 if not fits(p) and p['symbol'] not in known:
-                    entry['excluded'].append({'symbol': p['symbol'], 'name': p['name'], 'reasons': universe.unaffordable(p, p, budget)})
+                    entry['excluded'].append({'symbol': p['symbol'], 'name': p['name'], 'reasons': universe.unaffordable(p, p, budget, risk)})
             entry['picks'], entry['ranked'] = keep, [p for p in ranked if fits(p)]
             for record in s.get('focus_history') or []:
                 if record.get('market') == market and record.get('session_date') == session_date:
@@ -258,7 +259,8 @@ class FocusMixin:
             measured = sum(1 for m in metrics.values() if m)
             if measured < MIN_MEASURED:
                 raise FocusData(f'일봉을 읽을 수 있는 종목이 {measured}개뿐입니다.')
-            passed, excluded = universe.rank_pool(rank_items, metrics, self.intel.attention(market), self.c.mode != 'toss', profile, budget)
+            passed, excluded = universe.rank_pool(rank_items, metrics, self.intel.attention(market), self.c.mode != 'toss', profile, budget,
+                                                  self.risk_budget(state))
             meta = {'status': 'none', 'attempts': 0, 'last_attempt': 0}
         else:
             passed, excluded = existing['ranked'], existing['excluded']

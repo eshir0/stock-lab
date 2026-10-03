@@ -154,3 +154,28 @@ def test_a_real_answer_is_remembered_as_proof_that_the_provider_works(engine, mo
     before = time.time()
     engine.agents.bridge('claude', 'critic', {'reports': []}, False, 'sys', '{}', {}, False)
     assert engine.agents.answered['claude'] >= before
+
+
+# ---- re-checking a provider believed exhausted (2026-10-03: the limits had reset, the stored readings had not) ------------------
+
+def test_a_provider_believed_exhausted_is_probed_every_three_hours(engine, monkeypatch):
+    calls, sent, t0 = [], [], time.time()
+    def post(url, **kwargs):
+        calls.append(kwargs['json']['provider']); sent.append(kwargs['json'])
+        return httpx.Response(200, json={'ok': True, 'data': {'ok': True}, 'model': 'codex/gpt-6.1-sol'}, request=httpx.Request('POST', url))
+    monkeypatch.setattr(httpx, 'post', post)
+    states = {'claude': 'ok', 'codex': 'exhausted'}
+    monkeypatch.setattr(engine.agents.gate, 'status', lambda p, data=None: {'state': states[p]})
+    monkeypatch.setattr(engine, 'usable_providers', lambda: ['claude'])
+    engine.agents.answered['claude'] = t0+10*engine.CHECK_EVERY
+    engine.check_providers(now=t0)
+    assert calls == ['codex'] and sent[0].get('probe') is True
+    state = engine.store.read()
+    assert state['ai_checks']['codex']['probe'] and any('Codex 사용량 재확인: 응답 정상' in e['message'] for e in state['events'])
+    engine.check_providers(now=t0+700)
+    assert calls == ['codex']                                                   # not again within three hours
+    engine.check_providers(now=t0+engine.PROBE_EVERY+60)
+    assert calls == ['codex', 'codex']
+    states['codex'] = 'ok'
+    engine.check_providers(now=t0+2*engine.PROBE_EVERY+120)
+    assert all(not s.get('probe') for s in sent[2:])                            # usable again: no more probes

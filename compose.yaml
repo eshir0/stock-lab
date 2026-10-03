@@ -27,6 +27,7 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       DATABASE_URL: postgresql+psycopg://stocklab:${POSTGRES_PASSWORD}@db:5432/stocklab
+      EVIDENCE_DIR: /evidence
     ports:
       - "${APP_HOST:-127.0.0.1}:8080:8080"
     depends_on:
@@ -35,6 +36,9 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=64m
+    volumes:
+      # Daily evidence packs from the history archive (tools/data); read-only. Missing folder = no evidence.
+      - ${EVIDENCE_SOURCE:-/srv/stocklab-data/evidence}:/evidence:ro
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     pids_limit: 256

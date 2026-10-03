@@ -158,7 +158,7 @@ def screen_volatility(m, item, relaxed=False):
     return reasons
 
 
-def unaffordable(m, item, budget):
+def unaffordable(m, item, budget, risk=None):
     """[] when one share fits under the account's per-name limit, otherwise the reason. `budget` maps currency -> the most
     one name may cost (None means "not checked"). A pick the account can never buy only wastes a slot and analyses."""
     cap = (budget or {}).get(item['currency'])
@@ -169,6 +169,14 @@ def unaffordable(m, item, budget):
     if m['last'] > cap:
         show = lambda v: f'{v:,.0f}' if v >= 1000 else f'{v:,.2f}'
         return [f'1주 가격 {show(m["last"])}이 종목당 매수 한도 {show(cap)}를 넘어 이 원금으로는 살 수 없음']
+    # The desk sizes by risk: shares = allowed loss per trade / (price x stop). Even the tightest stop it accepts (2%, and
+    # at least one day's average range) on ONE share must fit, or every analysis of this name ends with zero shares.
+    allowed = (risk or {}).get(item['currency'])
+    if allowed is not None and m.get('last'):
+        one_share = m['last']*max(.02, (m.get('atr_pct') or 0)/100)
+        if one_share > allowed:
+            show = lambda v: f'{v:,.0f}' if v >= 1000 else f'{v:,.2f}'
+            return [f'1주만 사도 손절 시 손실 {show(one_share)}이 거래당 위험 한도 {show(allowed)}를 넘어 이 원금으로는 살 수 없음']
     return []
 
 
@@ -233,7 +241,7 @@ def score(m, item, attention=None, relaxed=False, profile='trend'):
     return round(_clamp(total, 0, 100), 1), {k: round(v, 1) for k, v in parts.items()}
 
 
-def rank_pool(items, metrics, attention=None, relaxed=False, profile='trend', budget=None):
+def rank_pool(items, metrics, attention=None, relaxed=False, profile='trend', budget=None, risk=None):
     """-> (passed sorted by score, excluded with reasons). `metrics` maps symbol -> daily_metrics or None."""
     passed, excluded = [], []
     for item in items:
@@ -241,7 +249,7 @@ def rank_pool(items, metrics, attention=None, relaxed=False, profile='trend', bu
         if m is None:
             excluded.append({'symbol': item['symbol'], 'name': item['name'], 'reasons': ['일봉 데이터 부족']})
             continue
-        reasons = screen(m, item, relaxed, profile)+unaffordable(m, item, budget)
+        reasons = screen(m, item, relaxed, profile)+unaffordable(m, item, budget, risk)
         if reasons:
             excluded.append({'symbol': item['symbol'], 'name': item['name'], 'reasons': reasons})
             continue

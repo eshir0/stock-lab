@@ -9,7 +9,8 @@ from zoneinfo import ZoneInfo
 
 from .agents import Agents, DESK_ROLES, market_context
 from .desk import DESK_CALLS
-from . import afterexit, entry, hours
+from . import afterexit, entry, fx, hours
+from .evidence import EvidenceStore
 from .evaluation import score_days, summarize, symbols_due, update_outcomes
 from .live.shadow import shadow_summary
 from .intel import FLOW_DAYS, FLOW_TTL, MarketIntel, RANK_KINDS, RANK_RETRY, RANK_TTL, parse_investor_trading, parse_rankings
@@ -52,6 +53,8 @@ class Engine(DeskMixin, FocusMixin):
         self.daily_cache = {}      # symbol -> (read at, completed daily bars of the last ~3 months)
         self.days_scored_at = 0
         self.benchmark_at = 0
+        self.dividends_at = 0
+        self.probed_at = {}
         self.checked_at = 0
         self.notifier = Notifier(config.notify_url)
         self.hours_lock = config.mode != 'demo'   # fixed regular hours per market (app/hours.py); demo quotes have no session
@@ -60,6 +63,7 @@ class Engine(DeskMixin, FocusMixin):
         self.provider = provider or (DemoProvider() if config.mode == 'demo' else TossProvider(config))
         self.agents = Agents(config, store)
         self.intel = MarketIntel()
+        self.evidence = EvidenceStore(config.evidence_dir)
         self.intel_pause = .25     # seconds between ranking calls: gentle on the ranking group's small burst
         self.busy = threading.Lock()
 
@@ -171,10 +175,17 @@ class Engine(DeskMixin, FocusMixin):
             result = self.store.reset_experiment(krw, usd, name, max_order_pct/100, strategy_mode, settings)
         except ValueError as exc:
             raise RuleError(str(exc)) from None
+        with self.store.edit() as s:
+            record = fx.start(usd, fx.read(self.c.evidence_dir), s['started_at'])
+            if record:
+                s['fx'] = record             # the won the dollars cost; the rate comes later if it is not readable now
         if strategy_mode == 'intraday':
             # The bar this experiment must clear is fixed now, before any result exists (verification.py).
             with self.store.edit() as s:
                 s['verification'] = result['verification'] = verification.start(self.c, s['started_at'])
+                s['verification']['exit_mode'] = (s.get('strategy_settings') or {}).get('exit_mode', 'target')
+                s['verification']['signal_filter'] = (s.get('strategy_settings') or {}).get('signal_filter', 'all')
+                s['verification']['evidence'] = (s.get('strategy_settings') or {}).get('evidence', 'off')
         return result
 
     def fractional(self, currency):
@@ -216,7 +227,18 @@ class Engine(DeskMixin, FocusMixin):
                 'max_buy_quantity': max_buy, 'max_sell_quantity': max_sell,
                 'integer_shares_only': not fractional, 'fractional_shares': fractional,
                 'shorting': False, 'leverage': False,
-                'leveraged_etfs': s.get('strategy_settings', {}).get('include_leveraged_etfs', False)}
+                'leveraged_etfs': s.get('strategy_settings', {}).get('include_leveraged_etfs', False),
+                **({'exit_rule': '이 실험은 익절가에 도달해도 팔지 않습니다. 익절가는 손익비 검증과 추적 손절 시작 기준(목표의 절반에서 손절가를 '
+                                 '올리기 시작)으로만 쓰이고, 이후 최고가에서 손절 폭만큼 떨어지면 팔거나 보유 기한에 청산합니다.'}
+                   if (s.get('strategy_settings') or {}).get('exit_mode') == 'trail' else {})}
+
+    def risk_budget(self, state):
+        """Whole-share currencies -> the most one trade may lose at its stop (equity x the experiment's risk per trade), for
+        leaving out names whose single share already risks more. Grows and shrinks with the account. Desk experiments only."""
+        if state.get('strategy_mode') != 'intraday':
+            return None
+        pct = (state.get('strategy_settings') or {}).get('risk_per_trade_pct', .5)
+        return {c: equity(state, c)*pct/100 for c in ('KRW', 'USD') if not self.fractional(c) and (state.get('initial') or {}).get(c, 0) > 0}
 
     def position_cap(self, state, currency):
         """The most one name may cost right now: the smaller of the per-order and per-name limits that `order_constraints`
@@ -287,6 +309,86 @@ class Engine(DeskMixin, FocusMixin):
                 score_days(s, now, bars)
                 afterexit.update(s, bars, now)
 
+    WITHHOLDING = {'KRW': Decimal('0.154'), 'USD': Decimal('0.15')}   # KR dividends 15.4%; US dividends to a Korean resident 15%
+
+    def credit_dividends(self, now=None):
+        """Pay dividends into the paper account like a broker would: a position bought before the ex-dividend date (exchange
+        local date) receives the cash per share times the shares held, minus the withholding tax, once the ex-date has
+        come. The dates and amounts come from the archive's daily evidence packs; a name without a fresh pack gets nothing
+        rather than a guess. Runs at most every 15 minutes, also while the desk is stopped (the shares are still held)."""
+        now = time.time() if now is None else now
+        if now-self.dividends_at < 900:
+            return
+        self.dividends_at = now
+        state = self.store.read()
+        if not state.get('positions'):
+            return
+        _, open_trips = scorecard.round_trips(state['trades'], state.get('dividends'))
+        done = {d['key'] for d in state.get('dividends') or []}
+        due = []
+        for trip in open_trips:
+            symbol = trip['symbol']
+            pack = self.evidence.get(symbol, now)
+            if not pack or symbol not in SYMBOLS:
+                continue
+            zone = ZoneInfo('Asia/Seoul' if SYMBOLS[symbol]['market'] == 'KR' else 'America/New_York')
+            bought = datetime.fromtimestamp(trip['opened'], zone).date().isoformat()
+            started = datetime.fromtimestamp(state.get('started_at') or 0, zone).date().isoformat()
+            today = datetime.fromtimestamp(now, zone).date().isoformat()
+            for d in pack.get('dividends') or []:
+                ex, amount = d.get('ex_date'), d.get('amount')
+                if (isinstance(ex, str) and isinstance(amount, (int, float)) and amount > 0 and bought < ex <= today
+                        and ex >= started and f'{symbol}:{ex}' not in done):
+                    due.append((symbol, ex, amount))
+        if not due:
+            return
+        with self.store.edit() as s:
+            if s['experiment_id'] != state['experiment_id']:
+                return
+            for symbol, ex, amount in due:
+                pos = s['positions'].get(symbol)
+                key = f'{symbol}:{ex}'
+                if not pos or key in {d['key'] for d in s.get('dividends') or []}:
+                    continue
+                currency = SYMBOLS[symbol]['currency']
+                gross = money(Decimal(str(pos['quantity']))*Decimal(str(amount)))
+                tax = money(Decimal(str(gross))*self.WITHHOLDING[currency])
+                net = money(Decimal(str(gross))-Decimal(str(tax)))
+                s['cash'][currency] = money(Decimal(str(s['cash'][currency]))+Decimal(str(net)))
+                s.setdefault('dividends', []).append({'key': key, 'symbol': symbol, 'ex_date': ex, 'per_share': amount,
+                                                      'quantity': pos['quantity'], 'gross': gross, 'tax': tax, 'net': net,
+                                                      'currency': currency, 'time': time.time()})
+                event(s, f'{SYMBOLS[symbol]["name"]} 배당 입금: 주당 {amount:g} × {pos["quantity"]}주 = {gross:,.2f}, '
+                         f'원천징수 {float(self.WITHHOLDING[currency])*100:g}% 차감 후 {net:,.2f} {currency} (배당락일 {ex}).')
+            record_performance(s, quote_age=self.c.quote_age, force=True)
+
+    def lock_verdict(self, now=None):
+        """Freeze the verification plan's first pass/fail as the official verdict (verification.official)."""
+        now = time.time() if now is None else now
+        state = self.public_state()
+        frozen = verification.official(state.get('verification'), now)
+        if not frozen:
+            return
+        with self.store.edit() as s:
+            plan = s.get('verification')
+            if plan and not plan.get('official') and s['experiment_id'] == state['experiment_id']:
+                plan['official'] = frozen
+                event(s, '검증 계획의 공식 판정이 정해졌습니다: '+('기준 통과' if frozen['status'] == 'pass' else '기준 미달')
+                         +'. 이후 판정은 참고용으로만 표시합니다.', 'warning' if frozen['status'] == 'fail' else 'info')
+
+    def settle_fx(self, now=None):
+        """An experiment started while the rate could not be read takes the first rate that can."""
+        state = self.store.read()
+        if not (state.get('fx') or {}).get('pending'):
+            return
+        reading = fx.read(self.c.evidence_dir, now)
+        if not reading:
+            return
+        with self.store.edit() as s:
+            if (s.get('fx') or {}).get('pending') and s['experiment_id'] == state['experiment_id']:
+                s['fx'] = dict(fx.start(s['initial'].get('USD', 0), reading, time.time()), late=True)
+                event(s, f'원/달러 환율을 실험 시작 시점에 읽지 못해 지금 환율 {reading["rate"]:,.2f}원으로 환전한 것으로 기록했습니다.')
+
     def refresh_benchmark(self, now=None):
         """Daily closes of the index ETFs the experiment is compared with (scorecard.BENCHMARKS), read at most every 15 minutes
         outside the state lock. The starting close is fixed the first time and never moves."""
@@ -318,6 +420,7 @@ class Engine(DeskMixin, FocusMixin):
 
     CHECK_EVERY = 24*3600          # a provider that has not answered for this long is sent one tiny request
     CHECK_RETRY = 3*3600           # a failed check is repeated after this long
+    PROBE_EVERY = 3*3600           # a provider believed exhausted is re-checked this often
 
     def usable_providers(self):
         gate = self.agents.gate
@@ -332,6 +435,22 @@ class Engine(DeskMixin, FocusMixin):
             return
         self.checked_at = now
         checks = self.store.read().get('ai_checks') or {}
+        # A provider the gate believes is exhausted or over the switch level is asked once every PROBE_EVERY with a tiny
+        # request that passes the bridge's cooldown: the readings it believes are only refreshed by real calls, so a limit
+        # that reset early would otherwise keep the desk waiting until the announced time (seen on 2026-10-03).
+        gate = self.agents.gate
+        if gate.enabled:
+            for provider in [p for p in self.c.provider_order if p in ('claude', 'codex')]:
+                if gate.status(provider)['state'] == 'ok' or now-self.probed_at.get(provider, 0) < self.PROBE_EVERY:
+                    continue
+                self.probed_at[provider] = now
+                result = self.agents.self_check(provider, probe=True)
+                label = PROVIDER_LABELS.get(provider, provider)
+                with self.store.edit() as s:
+                    s.setdefault('ai_checks', {})[provider] = dict(result, time=time.time(), probe=True)
+                    event(s, f'{label} 사용량 재확인: ' + (f'응답 정상 ({result["model"]}) · 사용 가능 여부를 새 기록으로 판단합니다.'
+                                                          if result['ok'] else '아직 사용할 수 없음 - '+result['message']))
+                return
         for provider in self.usable_providers():
             if provider not in ('claude', 'codex'):
                 continue
@@ -814,7 +933,14 @@ class Engine(DeskMixin, FocusMixin):
         s.pop('shadow_orders', None)
         evaluations = s.get('evaluations', [])
         s['evaluation'] = summarize(evaluations)
-        card = scorecard.report(s['trades'])                         # every trade, before the list is cut for the page
+        card = scorecard.report(s['trades'], s.get('dividends'))     # every trade, before the list is cut for the page
+        reading = fx.read(self.c.evidence_dir)                       # the live rate first, the archive's daily close second
+        usdkrw = (reading or {}).get('rate') or next(((self.evidence.get(x) or {}).get('regime', {}).get('usdkrw')
+                                                     for x in ('SPY', 'QQQ', 'AAPL')
+                                                     if (self.evidence.get(x) or {}).get('regime', {}).get('usdkrw')), None)
+        s['tax_estimate'] = scorecard.us_capital_gains_tax(s['trades'], usdkrw, time.time())
+        s['dividend_summary'] = scorecard.dividend_summary(s.get('dividends'))
+        s['fx_view'] = fx.view(s.get('fx'), (s.get('initial') or {}).get('USD', 0), equity(s, 'USD'), reading)
         s['scorecard'] = card
         s['after_exit'] = afterexit.summary(s)
         s.pop('after_exits', None)

@@ -98,11 +98,11 @@ def test_the_benchmark_is_an_index_etf_bought_at_the_start_and_held():
 CFG = Config(mode='demo', password='x'*8, session_secret='y'*32)
 
 
-def judge(days=60, mine=5.0, index=2.0, drawdown=3.0, expectancy=.8, ci=(.2, 1.4), closed=30, decisions=120, groups=None,
+def judge(days=60, mine=5.0, index=2.0, index_dd=4.0, drawdown=3.0, expectancy=.8, ci=(.2, 1.4), closed=30, decisions=120, groups=None,
           changes=(10_000,)*5, plan=None, **extra):
     state = {'verification': plan or verification.start(CFG, NOW-days*DAY), 'initial': {'KRW': 1_000_000, 'USD': 0},
              'performance': {'KRW': {'return_pct': mine, 'max_drawdown_pct': drawdown}},
-             'benchmark': {'KRW': {'name': 'KODEX 200', 'return_pct': index}} if index is not None else {}}
+             'benchmark': {'KRW': {'name': 'KODEX 200', 'return_pct': index, 'max_drawdown_pct': index_dd}} if index is not None else {}}
     equity, values = 1_000_000, {}
     for i, change in enumerate(changes):
         equity += change
@@ -131,7 +131,7 @@ def test_a_strategy_that_clears_every_bar_passes():
 
 @pytest.mark.parametrize('over, failing', [
     ({'index': 6.0}, 'benchmark_KRW'),                         # holding the index earned more
-    ({'drawdown': 5.5}, 'drawdown_KRW'),
+    ({'drawdown': 5.5}, 'drawdown_KRW'),                       # deeper than the index's 4%
     ({'ci': (-.1, 1.7)}, 'expectancy'),                        # positive on average, but not surely
     ({'expectancy': -.2, 'ci': (-.9, .5)}, 'expectancy'),
     ({'changes': (100_000, -10_000, -10_000, 5_000, 5_000)}, 'best_days_KRW'),   # one lucky day carried it
@@ -152,7 +152,7 @@ def test_a_check_that_cannot_be_computed_yet_keeps_it_collecting():
     assert judge(index=None)['status'] == 'collecting'
     assert judge(ci=None)['status'] == 'collecting'
     assert judge(changes=(1, 2, 3))['status'] == 'collecting'                                 # three days are not enough to drop three
-    assert judge(index=None, drawdown=9.0)['status'] == 'fail'                                # but a known failure is a failure
+    assert judge(index=None, ci=(-.5, .1))['status'] == 'fail'                               # but a known failure is a failure
 
 
 def test_a_change_of_strategy_halfway_is_flagged():
@@ -238,3 +238,58 @@ def test_a_position_sold_in_pieces_is_one_round_trip_until_nothing_is_left():
     closed, still = round_trips([fill(1, '005930', 'BUY', 10, 100.0), fill(2, '005930', 'SELL', 6, 110.0, realized=59.0),
                                  fill(3, '005930', 'SELL', 4, 120.0, realized=79.0)])
     assert len(closed) == 1 and closed[0]['pnl'] == 138.0 and still == []
+
+
+# ---- criteria version 2: drawdown against the index ------------------------------------------------------------------------------
+
+def test_the_drawdown_bar_follows_the_index_with_a_floor():
+    assert judge(drawdown=12.0, index_dd=15.0)['status'] == 'pass'                         # the market fell harder: still fine
+    assert judge(drawdown=2.9, index_dd=1.0)['status'] == 'pass'                           # a calm market: the 3% floor
+    assert judge(drawdown=3.1, index_dd=1.0)['status'] == 'fail'
+    check = next(c for c in judge(drawdown=12.0, index_dd=15.0)['checks'] if c['key'] == 'drawdown_KRW')
+    assert '지수 15.00%' in check['detail'] and '허용 15.00%' in check['detail']
+
+
+def test_the_drawdown_waits_for_the_index_bars():
+    verdict = judge(index_dd=None)
+    assert next(c for c in verdict['checks'] if c['key'] == 'drawdown_KRW')['ok'] is None and verdict['status'] == 'collecting'
+
+
+def test_a_plan_fixed_under_the_old_criteria_keeps_its_5_percent_rule():
+    old = {**verification.start(CFG, NOW-60*DAY)}
+    old['criteria'] = {'min_days': 56, 'min_trades': 30, 'min_decisions': 100, 'decision_horizon': 'd5', 'max_drawdown_pct': 5.0,
+                       'drop_best_days': 3}
+    assert judge(plan=old, drawdown=5.5, index_dd=20.0)['status'] == 'fail'
+    assert judge(plan=old, drawdown=4.0, index_dd=1.0)['status'] == 'pass'
+    assert verification.CRITERIA['criteria_version'] == 2 and 'max_drawdown_pct' not in verification.CRITERIA
+
+
+# ---- the official verdict ----------------------------------------------------------------------------------------------------------
+
+def test_the_first_decided_verdict_is_frozen_and_later_ones_do_not_replace_it():
+    assert verification.official(judge(days=30), NOW) is None                              # still collecting
+    first = verification.official(judge(drawdown=9.0), NOW)
+    assert first['status'] == 'fail' and first['time'] == NOW
+    plan = verification.start(CFG, NOW-60*DAY)
+    plan['official'] = first
+    later = judge(plan=plan)                                                                # a lucky pass afterwards
+    assert later['status'] == 'pass' and later['official']['status'] == 'fail'
+    assert verification.official(later, NOW) is None                                       # never re-frozen
+
+
+def test_the_engine_freezes_it_once(tmp_path, monkeypatch):
+    from app.engine import Engine
+    from app.store import Store
+    config = Config(database_url='sqlite:///'+str(tmp_path/'v.db'), mode='demo', password='x'*8, session_secret='y'*32)
+    store = Store(config.database_url, config.mode)
+    engine = Engine(config, store)
+    engine.boot()
+    engine.new_experiment(1000000, 1000, 'v', strategy_mode='intraday', strategy_settings={'horizon': 'month'})
+    decided = {'status': 'pass', 'progress': [], 'checks': [], 'strategy_changed': False}
+    monkeypatch.setattr(verification, 'judge', lambda *a, **k: dict(decided, official=store.read()['verification'].get('official')))
+    engine.lock_verdict(now=NOW)
+    assert store.read()['verification']['official']['status'] == 'pass'
+    decided['status'] = 'fail'
+    engine.lock_verdict(now=NOW+1)
+    assert store.read()['verification']['official'] == {'status': 'pass', 'time': NOW, 'strategy_changed': False, 'progress': [], 'checks': []}
+    store.release()
