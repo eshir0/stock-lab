@@ -255,7 +255,7 @@ flowchart TD
 
 | 순서 | 공급자 | 호출 방식 | 모델 | 추론 깊이 | 비용 |
 |:-:|---|---|---|:-:|---|
-| 1 | **Claude** | `claude -p` (중계) | `claude-opus-5-5` | medium | Claude 구독 사용량 |
+| 1 | **Claude** | `claude -p` (중계) | `claude-opus-5-5` (판단) · `claude-sonnet-5-5` (조사) | high · high (2026-10-06) | Claude 구독 사용량 |
 | 2 | **Codex** | `codex exec` (중계) | `gpt-6.1-sol` | high | ChatGPT 구독 사용량 |
 | (선택) | Gemini | REST API (앱 직접) | `gemini-3.5-flash` | high | 무료 등급 — **기본 구성에서 제외** ([아래](#선택-gemini)) |
 
@@ -769,8 +769,8 @@ docker compose exec -T app python -c "import urllib.request;print(urllib.request
 | AI | `AI_BRIDGE_URL` | `http://host.docker.internal:8765` | 앱 → 중계 서비스 주소 |
 | AI | `AI_BRIDGE_BIND` | `172.17.0.1:8765` | 중계 서비스 수신 주소 |
 | AI | `AI_BRIDGE_TOKEN` | (64자 무작위) | 앱 ↔ 중계 인증 토큰 |
-| Claude | `CLAUDE_MODEL` / `CLAUDE_EFFORT` | `claude-opus-5-5` / `medium` | 모델 / 추론 깊이 |
-| Claude | `CLAUDE_MODEL_LIGHT` (`CLAUDE_EFFORT_LIGHT`) | `claude-sonnet-5-5` | 조사 역할이 쓰는 가벼운 모델(중계 서비스가 읽음). 비우면 모든 역할이 주력 모델 |
+| Claude | `CLAUDE_MODEL` / `CLAUDE_EFFORT` | `claude-opus-5-5` / `high` | 모델 / 추론 깊이 (low·medium·high·xhigh·max) |
+| Claude | `CLAUDE_MODEL_LIGHT` / `CLAUDE_EFFORT_LIGHT` | `claude-sonnet-5-5` / `high` | 조사 역할이 쓰는 가벼운 모델(중계 서비스가 읽음). 비우면 모든 역할이 주력 모델 |
 | AI | `AI_LIGHT_ROLES` | `planner,fundamental,technical,news` | 가벼운 모델로 돌릴 역할. 비우면 분담하지 않음 |
 | Codex | `CODEX_MODEL` / `CODEX_EFFORT` | `gpt-6.1-sol` / `high` | 모델 / 추론 깊이 |
 | Gemini | `GEMINI_API_KEY` | | API 키 |
