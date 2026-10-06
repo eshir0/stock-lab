@@ -197,12 +197,24 @@ def safe(symbol):
 
 # ---- daily --------------------------------------------------------------------------------------------------------------------
 
-def daily(full=False):
+def pool_symbols():
+    """The site's own candidate names (app/instruments.py, mounted read-only at /app)."""
+    sys.path.insert(0, '/app')
+    from app.instruments import SYMBOLS
+    return set(SYMBOLS)
+
+
+def daily(full=False, only=None):
+    """Daily bars of every listed name. `only` (a set of symbols) limits the run to those plus the macro series: the
+    service reads the site's candidates first, so their evidence packs are rebuilt within minutes instead of waiting
+    hours behind the whole market."""
     m = load_manifest()
     done = m.setdefault('daily', {})
     jobs = [('MACRO', r) for r in load_universe('macro').itertuples()]
     jobs += [('KR', r) for r in load_universe('kr').itertuples()]
     jobs += [('US', r) for r in load_universe('us').itertuples()]
+    if only is not None:
+        jobs = [(market, r) for market, r in jobs if market == 'MACRO' or r.symbol in only]
     today = time.time()
     count, saved_at = 0, time.time()
     for market, r in jobs:
@@ -327,12 +339,13 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('job', choices=('universe', 'daily', 'hourly', 'minute', 'all', 'status'))
     p.add_argument('--full', action='store_true')
+    p.add_argument('--pool', action='store_true', help='daily: only the site\'s candidates and the macro series')
     a = p.parse_args()
     DATA.mkdir(parents=True, exist_ok=True)
     if a.job in ('universe', 'all'):
         universe()
     if a.job in ('daily', 'all'):
-        daily(a.full)
+        daily(a.full, pool_symbols() if a.pool else None)
     if a.job in ('hourly', 'all'):
         intraday('hourly', '1h', '730d', HOURLY_US, HOURLY_KR)
     if a.job in ('minute', 'all'):

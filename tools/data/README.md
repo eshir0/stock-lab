@@ -29,12 +29,17 @@
 
 ```mermaid
 flowchart LR
-    T["⏰ stocklab-data.timer<br/>매일 16:40"] --> C["collector.py all<br/>목록 → 일봉 → 시간봉 → 1분봉"]
+    T["⏰ stocklab-data.timer<br/>매일 16:40"] --> P["collector.py daily --pool<br/>사이트 후보 36종목·거시 지표만 (몇 분)"]
+    P --> E["evidence.py<br/>근거 묶음 (오늘 밤 분석용)"]
+    E --> C["collector.py all<br/>목록 → 전체 일봉 → 시간봉 → 1분봉 (몇 시간)"]
     C --> S["sec.py<br/>(7일에 한 번)"]
     S --> D["dart.py<br/>(하루 한도 안에서)"]
+    D --> E2["evidence.py<br/>(재무 반영해 다시)"] --> Q["research_q6.py --if-ready"]
     C & S & D --> V[("/srv/stocklab-data")]
     V --> B["backtest.py<br/>매도 방식 A·B·C·C3 비교"]
 ```
+
+전체 시장 일봉(약 1만 6천 종목)은 몇 시간이 걸리므로, 사이트가 그날 밤 읽는 후보 종목의 일봉과 근거 묶음을 먼저 만들고 나서 전체를 받습니다(2026-10-06부터. 그 전에는 근거 묶음이 전체 수집이 끝날 때까지 하루 늦은 자료로 남았습니다).
 
 ## 📁 폴더 구조
 
