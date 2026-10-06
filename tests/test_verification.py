@@ -355,3 +355,20 @@ def test_the_index_collects_its_dividends_like_the_account_does():
     assert later['return_pct'] == pytest.approx(0.7, abs=1e-3) and later['max_drawdown_pct'] == 1.0
     kept = benchmark_entry('SPY', rows+[{'time': day(12, 21), 'close': 99.5}], started, later, None, 0.15)   # a stale pack
     assert kept['dividends'] == {'2026-12-18': 1.7} and kept['return_pct'] == pytest.approx(1.2, abs=1e-3)
+
+
+def test_the_index_checks_wait_for_a_close_after_the_start():
+    """A fresh experiment showed both index comparisons as passed on day 0 (0.00% against 0.00%)."""
+    flat = {'name': 'KODEX 200', 'start_time': NOW-DAY, 'last_time': NOW-DAY, 'return_pct': 0.0, 'max_drawdown_pct': 0.0}
+
+    def checks(entry):
+        state = {'verification': verification.start(CFG, NOW), 'initial': {'KRW': 1_000_000, 'USD': 0},
+                 'performance': {'KRW': {'return_pct': 0.0, 'max_drawdown_pct': 0.0}}, 'benchmark': {'KRW': entry}}
+        verdict = verification.judge(state, tracking={}, report={'closed': 0, 'expectancy_pct': None, 'ci_pct': None, 'groups': {}},
+                                     evaluation={}, config=CFG, now=NOW+60)
+        return {c['key']: c for c in verdict['checks']}
+    day0 = checks(flat)
+    assert day0['benchmark_KRW']['ok'] is None and day0['drawdown_KRW']['ok'] is None
+    assert '다음 종가를 기다립니다' in day0['benchmark_KRW']['detail']
+    later = checks(dict(flat, last_time=NOW+DAY, return_pct=1.0))
+    assert later['benchmark_KRW']['ok'] is False and later['drawdown_KRW']['ok'] is True

@@ -95,11 +95,17 @@ def judge(state, *, tracking, report, evaluation, config, now):
     add('expectancy', '거래당 기대값 > 0, 95% 신뢰구간 하한도 > 0 (비용·세금 차감)',
         None if ci is None else bool(mean > 0 and ci[0] > 0),
         f'기대값 {_pct(mean)} · 신뢰구간 {_pct(ci[0])} ~ {_pct(ci[1])}' if ci else '청산된 거래 2건부터 계산합니다')
+    # Until the index has a close after its starting one there is no period to compare yet: both sides read 0.00% and a
+    # tick here would only say "nothing happened" (2026-10-06, a fresh experiment showed two passes on day 0).
+    begun = {cy: not ({'start_time', 'last_time'} <= set(benchmark.get(cy) or {}))
+             or benchmark[cy]['last_time'] > benchmark[cy]['start_time'] for cy in active}
+    waiting = '지수의 시작 종가 다음 종가를 기다립니다'
     for cy in active:
         mine, index = (performance.get(cy) or {}).get('return_pct'), benchmark.get(cy)
         add('benchmark_'+cy, f'{cy} 계좌 수익률 ≥ 같은 기간 {index["name"] if index else "지수 ETF"} 보유(배당 포함)',
-            None if index is None or mine is None else bool(mine >= index['return_pct']),
-            f'이 실험 {_pct(mine)} · 지수 {_pct(index["return_pct"])}' if index else '지수 일봉을 아직 읽지 못했습니다')
+            None if index is None or mine is None or not begun[cy] else bool(mine >= index['return_pct']),
+            (f'이 실험 {_pct(mine)} · 지수 {_pct(index["return_pct"])}' + ('' if begun[cy] else f' · {waiting}'))
+            if index else '지수 일봉을 아직 읽지 못했습니다')
     for cy in active:
         drawdown = (performance.get(cy) or {}).get('max_drawdown_pct')
         if legacy_drawdown:
@@ -110,7 +116,7 @@ def judge(state, *, tracking, report, evaluation, config, now):
         index_dd = index.get('max_drawdown_pct')
         allowed = None if index_dd is None else max(index_dd, c['drawdown_floor_pct'])
         add('drawdown_'+cy, f'{cy} 최대 낙폭 ≤ 같은 기간 {index.get("name") or "지수 ETF"}의 최대 낙폭 (최소 {c["drawdown_floor_pct"]:g}%까지 허용)',
-            None if drawdown is None or allowed is None else bool(drawdown <= allowed),
+            None if drawdown is None or allowed is None or not begun[cy] else bool(drawdown <= allowed),
             f'이 실험 {drawdown or 0:.2f}% · 지수 {index_dd:.2f}% · 허용 {allowed:.2f}%' if allowed is not None
             else f'이 실험 {drawdown or 0:.2f}% · 지수 일봉을 아직 읽지 못했습니다')
     for cy in active:
