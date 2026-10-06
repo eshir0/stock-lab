@@ -679,11 +679,9 @@ dialog .eyebrow{margin:0 0 8px}
 .car-track{display:flex;gap:16px;overflow-x:auto;scroll-snap-type:x mandatory;scroll-padding-inline:2px;padding:4px 2px 12px;scrollbar-width:none;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch;outline:none}
 .car-track::-webkit-scrollbar{display:none}
 .car-track:focus-visible{box-shadow:0 0 0 2px var(--focus);border-radius:var(--r-card)}
-.car-track.rule-board,.car-track.reports{display:flex;margin:0;grid-template-columns:none}
+.car-track.rule-board{display:flex;margin:0;grid-template-columns:none}
 .car-slide{flex:0 0 min(360px,84%);min-width:0;scroll-snap-align:start;scroll-snap-stop:always}
 .car-slide.wide{flex-basis:calc(100% - 72px)}
-.report-card{flex-basis:min(520px,86%);max-height:620px;overflow:auto;border-radius:var(--r-card);background:var(--glass-2);border:1px solid var(--line-2);padding:16px 20px;box-shadow:var(--shadow-sm)}
-.report-title{margin:0 0 8px;font-size:.92rem;line-height:1.6}
 .eval-slide{border-radius:var(--r-card);background:var(--glass-2);border:1px solid var(--line-2);padding:16px 20px;max-height:760px;overflow:auto}
 .car-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:2px}
 .car-dots{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
