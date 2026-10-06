@@ -121,6 +121,9 @@ def normalize_settings(settings=None):
     exit_mode = settings.get('exit_mode', 'target')
     signal_filter = settings.get('signal_filter', 'all')       # saved experiments act on every rule, as they started
     use_evidence = settings.get('evidence', 'off')              # ... and analyse without the archive's evidence packs
+    scan = settings.get('scan', 'focus')                         # ... and only look at the daily focus list
+    if scan not in ('focus', 'pool'):
+        raise RiskError('후보 확인 범위는 focus 또는 pool이어야 합니다.')
     if use_evidence not in ('on', 'off'):
         raise RiskError('과거 근거 사용은 on 또는 off여야 합니다.')
     if signal_filter not in ('all', 'research'):
@@ -129,7 +132,7 @@ def normalize_settings(settings=None):
         raise RiskError('익절 방식은 target 또는 trail이어야 합니다.')
     return {'include_leveraged_etfs': leveraged, 'universe_mode': universe, 'horizon': horizon,
             'risk_per_trade_pct': float(risk), 'daily_loss_limit_pct': float(daily), 'max_holding_minutes': int(holding),
-            'max_position_pct': shares.number(position), 'exit_mode': exit_mode, 'signal_filter': signal_filter, 'evidence': use_evidence}
+            'max_position_pct': shares.number(position), 'exit_mode': exit_mode, 'signal_filter': signal_filter, 'evidence': use_evidence, 'scan': scan}
 
 
 def _instrument(symbol):

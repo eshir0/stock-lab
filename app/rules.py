@@ -131,7 +131,7 @@ def trigger_price(candles, rule, side):
     return math.floor(lo*1e4)/1e4
 
 
-def board(candles, held, ignore=()):
+def board(candles, held, ignore=(), sells_off=False):
     """Per rule: the side that matters (SELL when held, BUY otherwise), whether it fired on the last completed bar, the
     trigger price for the next bar, and whether the experiment ignores it; plus 60 bars and the reference lines for a chart."""
     side = 'SELL' if held else 'BUY'
@@ -140,7 +140,7 @@ def board(candles, held, ignore=()):
     for rule in RULES:
         rows.append({'rule': rule, 'side': side, 'fired': now.get(rule) == side,
                      'trigger': trigger_price(candles, rule, side) if len(candles) >= 23 else None,
-                     'higher': _DIRECTION[rule][side], 'ignored': (not held) and rule in ignore})
+                     'higher': _DIRECTION[rule][side], 'ignored': sells_off or ((not held) and rule in ignore)})
     closes = [c['close'] for c in candles]
     window = closes[-20:]
     mean = sum(window)/len(window)

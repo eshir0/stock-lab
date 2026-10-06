@@ -109,6 +109,8 @@
 <fieldset id="intraday-settings" class="strategy-fields"><legend>매매 기간과 위험 기준</legend>
 <label class="field-label" for="horizon">투자 기간</label><select id="horizon" name="horizon"><option value="month">1개월 스윙 · 최대 30일 보유, 밤새 보유</option></select>
 <p id="horizon-description" class="muted small"></p>
+<label class="field-label" for="scan-mode">확인할 종목</label><select id="scan-mode" name="scan"><option value="pool">후보 전체를 규칙으로 확인 (추천)</option><option value="focus">오늘의 집중 종목만</option></select>
+<p class="muted small">후보 전체(국내 약 16개·미국 약 18개)의 일봉을 30분마다 규칙으로 확인해, 신호가 켜진 종목을 집중 종목과 함께 감시·분석합니다. AI는 신호가 켜진 종목만 분석합니다. 집중 종목은 오르는 추세 위주라, 떨어졌을 때 사는 평균회귀 신호는 집중 종목만 보면 거의 켜지지 않습니다.</p>
 <label class="field-label" for="evidence-mode">과거 근거</label><select id="evidence-mode" name="evidence"><option value="on">AI 분석에 과거 20년 근거 묶음 제공 (추천)</option><option value="off">제공하지 않음</option></select>
 <p class="muted small">매일 장 마감 뒤 서버가 계산한 신호별 과거 성적, 이 종목의 과거 결과, 비슷한 상황의 결과, 시장 상황, 재무·공시를 분석팀이 근거로 인용합니다.</p>
 <label class="field-label" for="signal-filter">매수 신호</label><select id="signal-filter" name="signal_filter"><option value="research">과거 20년 연구로 거른 신호만 (추천)</option><option value="all">규칙 신호 4종 모두</option></select>

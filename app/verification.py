@@ -133,5 +133,5 @@ def judge(state, *, tracking, report, evaluation, config, now):
     return {'status': status, 'ready': ready, 'started_at': plan['started_at'], 'criteria': c, 'progress': progress,
             'checks': checks, 'strategy_changed': changed, 'version': plan.get('version'),
             'ai_vs_rule': scored.get('ai_vs_rule'), 'exit_mode': plan.get('exit_mode', 'target'),
-            'signal_filter': plan.get('signal_filter', 'all'), 'evidence': plan.get('evidence', 'off'),
+            'signal_filter': plan.get('signal_filter', 'all'), 'evidence': plan.get('evidence', 'off'), 'scan': plan.get('scan', 'focus'),
             'official': plan.get('official')}

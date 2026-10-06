@@ -11,12 +11,13 @@ import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from . import universe
+from . import gate, universe
 from .agents import STOPPED
 from .desk import DESK_CALLS
 from .instruments import CATALOGUE, INSTRUMENTS, SYMBOLS
 from .providers import ProviderError, RateLimited
-from .risk import horizon_of
+from .risk import horizon_of, is_etf
+from .rules import signals as rule_signals
 from .store import event
 
 MARKETS = ('KR', 'US')
@@ -69,12 +70,88 @@ class FocusMixin:
         return [i['symbol'] for i in INSTRUMENTS if i['market'] == market and (include or not i.get('leveraged_etf'))]
 
     def buyable_symbols(self, state, now=None):
-        """Symbols the desk may open or add to right now."""
+        """Symbols the desk may open or add to right now: today's focus list, plus (scan == 'pool') every pool name a rule
+        flagged on its last completed daily bar."""
         symbols = []
         for market in MARKETS:
             picks = self.focus_symbols(state, market, now)
             symbols += self.fixed_symbols(state, market) if picks is None else picks
+            symbols += [s for s in self.signal_symbols(state, market, now) if s not in symbols]
         return symbols
+
+    # ---- the whole pool, scanned by the rules (strategy_settings.scan == 'pool') -----------------------------------
+
+    SIGNAL_SCAN_EVERY = 30*60          # daily bars only change once a day; the scan reads them from the shared cache
+    SIGNAL_SCAN_AGE = 3*3600           # a scan older than this no longer adds names
+
+    @staticmethod
+    def scans_pool(state):
+        return (state.get('strategy_mode') == 'intraday' and universe_mode(state) == 'daily_focus'
+                and (state.get('strategy_settings') or {}).get('scan') == 'pool')
+
+    def signal_symbols(self, state, market, now=None):
+        if not self.scans_pool(state):
+            return []
+        now = time.time() if now is None else now
+        found = state.get('signal_names') or {}
+        if found.get('experiment_id') != state.get('experiment_id') or now-found.get('time', 0) > self.SIGNAL_SCAN_AGE:
+            return []
+        return list(found.get(market) or [])
+
+    def scan_pool(self, now=None):
+        """Read every pool name's completed daily bars and keep those a BUY rule flags after the experiment's research
+        filter, leaving out names whose single share already risks more than one trade may lose. No quotes, no AI: the
+        names found join the poll, and the gate and the analysts then treat them like focus names. The 2006-2026 research
+        that chose the rules scanned the whole liquid universe, not a short trend-picked list (2026-10-06)."""
+        now = time.time() if now is None else now
+        state = self.store.read()
+        if not self.scans_pool(state) or not state.get('running'):
+            return
+        if now-(state.get('signal_names') or {}).get('time', 0) < self.SIGNAL_SCAN_EVERY and \
+                (state.get('signal_names') or {}).get('experiment_id') == state.get('experiment_id'):
+            return
+        settings = state.get('strategy_settings') or {}
+        include = settings.get('include_leveraged_etfs', False)
+        mode = settings.get('signal_filter', 'all')
+        risk = self.risk_budget(state) or {}
+        held = set(state.get('positions') or {})
+        found, checked = {}, 0
+        for market in MARKETS:
+            currency = 'KRW' if market == 'KR' else 'USD'
+            if (state.get('initial') or {}).get(currency, 0) <= 0:
+                continue
+            names = []
+            for item in CATALOGUE:
+                symbol = item['symbol']
+                if item['market'] != market or symbol in held or (item.get('leveraged_etf') and not include):
+                    continue
+                try:
+                    rows = self.daily_bars(symbol, now)
+                except (ProviderError, KeyError, ValueError):
+                    continue
+                if len(rows) < 23:
+                    continue
+                checked += 1
+                ignore = gate.dropped(mode, market, is_etf(symbol))
+                fired = [r for r, v in rule_signals(rows).items() if v == 'BUY' and r not in ignore]
+                if not fired:
+                    continue
+                last = rows[-1]['close']
+                ranges = [max(b['high'], p['close'])-min(b['low'], p['close']) for p, b in zip(rows[-15:-1], rows[-14:])
+                          if 'high' in b and 'low' in b]
+                atr_pct = sum(ranges)/len(ranges)/last*100 if ranges else 0
+                if universe.unaffordable({'last': last, 'atr_pct': atr_pct}, item, None, risk):
+                    continue
+                names.append(symbol)
+            found[market] = names
+        with self.store.edit() as s:
+            if s.get('experiment_id') != state.get('experiment_id'):
+                return
+            before = s.get('signal_names') or {}
+            s['signal_names'] = {'experiment_id': s['experiment_id'], 'time': now, 'checked': checked, **found}
+            added = [SYMBOLS[x]['name'] for m in MARKETS for x in found.get(m, []) if x not in (before.get(m) or [])]
+            if added:
+                event(s, '규칙 신호가 켜진 종목을 감시 대상에 추가했습니다(후보 전체 확인): '+', '.join(added))
 
     def focus_allows(self, state, symbol):
         if state.get('strategy_mode') != 'intraday' or universe_mode(state) != 'daily_focus':
@@ -311,6 +388,12 @@ class FocusMixin:
             if SYMBOLS.get(symbol, {}).get('market') != market:
                 continue
             if symbol in picked:
+                position.pop('rotation', None)
+                continue
+            if self.scans_pool(s):
+                # The pool-scan experiments follow the research's exits only (trailing stop, target rule, holding limit,
+                # daily loss limit): a list change sells nothing. The old rule sold names below their 20-day average -
+                # exactly where a mean-reversion buy sits - the morning after it was bought (2026-10-06).
                 position.pop('rotation', None)
                 continue
             quote = s['quotes'].get(symbol) or {}

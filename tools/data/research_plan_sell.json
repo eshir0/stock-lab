@@ -1,0 +1,7 @@
+{
+  "registered": "2026-10-06 (KST), before this comparison was run",
+  "question": "While a position is held, the site asks the AI whether to sell whenever any rule says SELL on a completed daily bar. The research that chose exit C never included such sells. Does selling at the next open after a SELL signal help or hurt?",
+  "setup": "research.py base (research signal filter entries, stop 1.5 x ATR, take 1.5 x stop, exit C, 21 sessions, real costs); paired on the same entries: C alone vs C plus 'sell at the next open after any rule says SELL' (the most the AI could follow the signal)",
+  "split": {"develop": ["2006-01-01", "2018-12-31"], "holdout": ["2019-01-01", "2026-12-31"]},
+  "adopt": "SELL-signal analyses stay only if C+SELL beats C in mean per trade in BOTH markets in BOTH periods. Otherwise pool-scan experiments stop asking the AI about held names on SELL signals and leave exits to the research's rules (the owner's '지금 분석' still works)."
+}

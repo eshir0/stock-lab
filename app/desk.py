@@ -153,14 +153,15 @@ class DeskMixin:
                 ignore = gate.dropped((snapshot.get('strategy_settings') or {}).get('signal_filter', 'all'),
                                       SYMBOLS[symbol]['market'], is_etf(symbol))
                 verdict = gate.assess(held=held, signals=signal, last=self.last_evaluation(snapshot, symbol),
-                                      price=mid(quote), now=now, forced=forced, ignore=ignore)
+                                      price=mid(quote), now=now, forced=forced, ignore=ignore,
+                                      sell_signals=not self.scans_pool(snapshot))
             else:
                 verdict = {'eligible': forced, 'reason': 'requested' if symbol == requested else 'no_data', 'rules': []}
                 problem = problem or f'완료된 일봉 {len(rows or [])}개 (필요 {history.MIN_BARS}개)'
             verdicts[symbol] = dict(verdict, signals=signal, held=held)
             if rows is not None and len(rows) >= history.MIN_BARS:
                 try:
-                    verdicts[symbol]['board'] = board(rows, held, ignore)
+                    verdicts[symbol]['board'] = board(rows, held, ignore, sells_off=held and self.scans_pool(snapshot))
                 except (KeyError, TypeError, ValueError, ZeroDivisionError):
                     pass                     # the board is a display aid; the gate decision above stands
             checks.append({'symbol': symbol, 'name': name, 'held': held, 'eligible': verdict['eligible'],

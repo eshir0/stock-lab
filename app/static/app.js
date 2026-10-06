@@ -173,6 +173,7 @@ $('experiment-open').onclick = () => {
   $('exit-mode').value = 'trail';
   $('signal-filter').value = 'research';
   $('evidence-mode').value = 'on';
+  $('scan-mode').value = 'pool';
   $('universe-mode').value = 'daily_focus';
   $('risk-per-trade').value = '0.5';
   $('daily-loss-limit').value = '2';
@@ -208,7 +209,7 @@ $('experiment-form').addEventListener('submit', async e => {
   const seed_krw = Number($('seed-krw').value), seed_usd = Number($('seed-usd').value), max_order_pct = Number($('max-order-pct').value), max_position_pct = Number($('max-position-pct').value);
   const strategy_mode = $('strategy-mode').value;
   const horizon = $('horizon').value, span = horizons[horizon] || horizons.month, holdingInput = Number($('max-holding').value);
-  const settings = {include_leveraged_etfs:$('include-leveraged-etfs').checked,risk_per_trade_pct:Number($('risk-per-trade').value),daily_loss_limit_pct:Number($('daily-loss-limit').value),horizon,max_holding_minutes:holdingInput * span.unit,exit_mode:$('exit-mode').value,signal_filter:$('signal-filter').value,evidence:$('evidence-mode').value};
+  const settings = {include_leveraged_etfs:$('include-leveraged-etfs').checked,risk_per_trade_pct:Number($('risk-per-trade').value),daily_loss_limit_pct:Number($('daily-loss-limit').value),horizon,max_holding_minutes:holdingInput * span.unit,exit_mode:$('exit-mode').value,signal_filter:$('signal-filter').value,evidence:$('evidence-mode').value,scan:$('scan-mode').value};
   if (!name || ![seed_krw,seed_usd,max_order_pct].every(Number.isFinite) || seed_krw < 0 || seed_usd < 0 || seed_krw + seed_usd <= 0 || max_order_pct < 1 || max_order_pct > 100 || !Number.isFinite(max_position_pct) || max_position_pct < 10 || max_position_pct > 100) {
     $('experiment-error').textContent = '실험 이름과 원금을 확인해 주세요. 최소 한 통화의 원금은 0보다 커야 하고, 1회 매수 한도는 1~100%, 종목당 최대 비중은 10~100%입니다.';
     return;
@@ -469,7 +470,7 @@ function renderIntel(s) {
   parts.push(`국내 수급 ${it.flows.count}/${it.flows.tried}종목`);
   $('intel-status').textContent = '토스 공식 시장 정보 · ' + parts.join(' · ');
 }
-const gateReasons = {signal:'규칙 신호', requested:'직접 요청', no_signal:'신호 없음', recent:'최근 분석함', no_data:'일봉 부족', filtered:'연구로 제외한 신호뿐'};
+const gateReasons = {signal:'규칙 신호', requested:'직접 요청', no_signal:'신호 없음', recent:'최근 분석함', no_data:'일봉 부족', filtered:'연구로 제외한 신호뿐', holding:'보유 중 · 청산 규칙이 관리'};
 const ruleLabels = {golden_cross:'골든크로스', momentum:'모멘텀', mean_reversion:'평균회귀', breakout:'돌파'};
 function ruleChart(b, live, currency) {
   const ch = b.chart, W = 300, H = 92, P = 4;
@@ -493,7 +494,7 @@ function renderRuleBoard(s) {
     const live = finite(q.last) ? q.last : b.last_close;
     const rows = b.rules.map(r => {
       let state = 'far', text = '';
-      if (r.ignored) { state = 'off'; text = '연구로 제외 · AI를 부르지 않음'; }
+      if (r.ignored) { state = 'off'; text = r.side === 'SELL' ? '참고용 · 보유 종목은 추적 손절·기한이 관리' : '연구로 제외 · AI를 부르지 않음'; }
       else if (r.fired) { state = 'met'; text = '어제 종가 기준 충족'; }
       else if (!finite(r.trigger)) { state = 'off'; text = r.rule === 'golden_cross' ? '이미 교차한 상태라 이번엔 불가' : '가까운 가격대에서 불가'; }
       else {

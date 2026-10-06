@@ -186,6 +186,7 @@ class Engine(DeskMixin, FocusMixin):
                 s['verification']['exit_mode'] = (s.get('strategy_settings') or {}).get('exit_mode', 'target')
                 s['verification']['signal_filter'] = (s.get('strategy_settings') or {}).get('signal_filter', 'all')
                 s['verification']['evidence'] = (s.get('strategy_settings') or {}).get('evidence', 'off')
+                s['verification']['scan'] = (s.get('strategy_settings') or {}).get('scan', 'focus')
         return result
 
     def fractional(self, currency):
