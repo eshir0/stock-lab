@@ -474,6 +474,26 @@ class DeskMixin:
                                   'result': '대기 중' if watch['status'] == 'waiting' else entry.FINISHED.get(watch['status'], watch['status'])}
         return note
 
+    FINAL_QUOTE_TRIES = 4          # one fresh quote after a finished analysis, retried through a short Toss cooldown
+    FINAL_QUOTE_WAIT = 12
+    RECORD_QUOTE_AGE = 60          # a HOLD may be recorded on the poll's quote when Toss is briefly refusing
+
+    def final_quote(self, symbol, decision):
+        """The quote a finished analysis acts on. A short Toss rate-limit pause used to throw away a whole analysis at this
+        last step (2026-10-06 10:41): it is retried, and a decision that places no order (HOLD) may be recorded on the
+        poll's own quote from the last minute instead. An order never goes out on anything but a fresh quote."""
+        for attempt in range(self.FINAL_QUOTE_TRIES):
+            try:
+                return self.quote_for_trade(symbol)
+            except ProviderError:
+                if decision.get('stance') == 'HOLD':
+                    polled = (self.store.read().get('quotes') or {}).get(symbol)
+                    if polled and time.time()-polled.get('received', 0) <= self.RECORD_QUOTE_AGE:
+                        return polled
+                if attempt == self.FINAL_QUOTE_TRIES-1:
+                    raise
+                time.sleep(self.FINAL_QUOTE_WAIT)
+
     def place_desk_order(self, s, symbol, decision, fresh, *, gen, rev, run_id, reference_quote=None, run=None, source='ai',
                          reused=False):
         """One BUY or SELL decision becomes a paper order under the desk's risk rules: size it, dry-run the fill on a copy, then fill
@@ -871,7 +891,7 @@ class DeskMixin:
         context['reports'].append(decision)
         save_reports([decision], None)
         usage_after = self.window_usage()[1]
-        fresh = self.quote_for_trade(symbol)
+        fresh = self.final_quote(symbol, decision)
         with self.store.edit() as s:
             if not s['running'] or s['generation'] != gen:
                 return

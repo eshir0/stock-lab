@@ -518,10 +518,11 @@ def validate_report(report, role, context, sources, desk=False):
         raise ValueError('invalid quantity')
     if not isinstance(report.get('summary'), str) or not 1 <= len(report['summary']) <= 12000:
         raise ValueError('invalid summary')
-    if not isinstance(report.get('risks'), list) or len(report['risks']) > 30 or any(
-            not isinstance(item, str) or len(item) > 2000 for item in report['risks']):
+    if not isinstance(report.get('risks'), list) or any(not isinstance(item, str) for item in report['risks']):
         raise ValueError('invalid risks')
     report = copy.deepcopy(report)
+    # A long answer is shortened, not thrown away: only the shape and the strategy numbers decide whether it is usable.
+    report['risks'] = [item[:2000] for item in report['risks'][:30]]
     valid_sources = {item['url']: {'url': item['url'], 'title': str(item.get('title') or item['url'])[:500],
                                   'retrieved_at': time.time()}
                      for item in sources if isinstance(item, dict) and _url(item.get('url'))}
@@ -557,12 +558,14 @@ def validate_report(report, role, context, sources, desk=False):
                 if _url(item.get('url')):
                     valid_sources[item['url']] = copy.deepcopy(item)
     evidence = report.get('evidence')
-    if not isinstance(evidence, list) or len(evidence) > 15:
+    if not isinstance(evidence, list):
         raise ValueError('invalid evidence')
+    evidence = evidence[:15]
     clean, removed = [], 0
     for item in evidence:
-        if not isinstance(item, dict) or not isinstance(item.get('claim'), str) or not 1 <= len(item['claim']) <= 2000:
+        if not isinstance(item, dict) or not isinstance(item.get('claim'), str) or not item['claim'].strip():
             raise ValueError('invalid evidence claim')
+        item = dict(item, claim=item['claim'][:2000])
         source = valid_sources.get(item.get('source_url'))
         if source is None:
             removed += 1
@@ -787,8 +790,9 @@ class Agents:
             raw = data['data']
             link_evidence(raw, sources, None)
             report = validate_report(raw, role, context, sources, desk=desk)
-        except (ValueError, TypeError, KeyError):
-            raise ProviderError(f'[{label} 응답 검증 실패] 형식·전략 수치·근거를 검증하지 못했습니다.') from None
+        except (ValueError, TypeError, KeyError) as exc:
+            reason = str(exc)[:80] if isinstance(exc, ValueError) else type(exc).__name__+' '+str(exc)[:60]
+            raise ProviderError(f'[{label} 응답 검증 실패 · {role}] 형식·전략 수치·근거를 검증하지 못했습니다 ({reason}).') from None
         self.gate.observe(provider, limits=data.get('limits'))
         self.answered[provider] = time.time()
         total = (data.get('usage') or {}).get('total_tokens') if isinstance(data.get('usage'), dict) else None

@@ -485,3 +485,33 @@ def test_exits_do_not_ask_toss_about_a_closed_market(desk):
     desk.provider.prices['005930'] = 94000.0                   # open again and below the stop: sold on a fresh quote
     desk.process_desk_exits()
     assert desk.provider.quote_calls == ['005930'] and desk.store.read()['trades'][-1]['exit_reason'] == '손절 조건'
+
+
+# ---- the last quote of a finished analysis (2026-10-06: a Toss pause threw a whole analysis away) ------------------------------
+
+def test_a_hold_is_recorded_on_the_polled_quote_when_toss_pauses(desk, monkeypatch):
+    from app.providers import ProviderError
+    calls = []
+    def paused(symbol):
+        calls.append(symbol)
+        raise ProviderError('토스 호출 한도(market-data)에 걸려 잠시 조회를 쉽니다.')
+    monkeypatch.setattr(desk, 'quote_for_trade', paused)
+    desk.refresh()
+    q = desk.final_quote('005930', {'stance': 'HOLD'})
+    assert q['symbol'] == '005930' and calls == ['005930']
+
+
+def test_an_order_waits_for_a_fresh_quote_and_gives_up_after_a_few_tries(desk, monkeypatch):
+    from app.providers import ProviderError
+    monkeypatch.setattr(desk, 'FINAL_QUOTE_WAIT', 0)
+    tries = []
+    def flaky(symbol):
+        tries.append(symbol)
+        if len(tries) < 3:
+            raise ProviderError('pause')
+        return {'symbol': symbol, 'fresh': True}
+    monkeypatch.setattr(desk, 'quote_for_trade', flaky)
+    assert desk.final_quote('005930', {'stance': 'BUY'}) == {'symbol': '005930', 'fresh': True} and len(tries) == 3
+    monkeypatch.setattr(desk, 'quote_for_trade', lambda s: (_ for _ in ()).throw(ProviderError('still paused')))
+    with pytest.raises(ProviderError):
+        desk.final_quote('005930', {'stance': 'BUY'})

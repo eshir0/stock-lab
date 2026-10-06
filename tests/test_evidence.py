@@ -152,3 +152,27 @@ def test_a_pack_built_today_from_old_prices_is_refused(tmp_path):
     assert store.get('005930')['symbol'] == '005930'
     write(tmp_path, dict(recent, stale=True))
     assert store.get('005930') is None
+
+
+def test_a_long_answer_is_shortened_not_rejected_and_a_bad_one_names_its_role_and_reason(tmp_path, monkeypatch):
+    import httpx
+    from app.agents import Agents, validate_report
+    from app.store import Store
+    ctx = {'strategy_mode': 'intraday', 'strategy_settings': {'horizon': 'month'}, 'reports': []}
+    base = {'stance': 'HOLD', 'quantity': 0, 'summary': 's', 'target_weight_pct': 0, 'stop_loss_pct': 5, 'take_profit_pct': 10,
+            'max_holding_minutes': 20160, 'tasks': []}
+    long = dict(base, risks=['r']*40, evidence=[{'claim': 'c'*3000, 'source_url': None}]*20)
+    report = validate_report(long, 'technical', ctx, [], desk=True)
+    assert len(report['risks']) <= 31 and report['evidence'] == []
+    config = Config(database_url='sqlite:///'+str(tmp_path/'v.db'), mode='toss', password=PASSWORD, session_secret=SECRET,
+                    toss_id='id', toss_secret='secret', gemini_key='', bridge_url='http://bridge.test:8765', bridge_token='t'*40,
+                    providers='claude')
+    store = Store(config.database_url, config.mode)
+    with store.edit() as s:
+        s.update(running=True, generation=1)
+    bad = dict(base, risks=[], evidence=[], stop_loss_pct=99)
+    monkeypatch.setattr(httpx, 'post', lambda url, **k: httpx.Response(200, json={'ok': True, 'data': bad}, request=httpx.Request('POST', url)))
+    with pytest.raises(Exception) as err:
+        Agents(config, store).run('technical', ctx, 1)
+    assert 'technical' in str(err.value) and 'stop_loss_pct' in str(err.value)
+    store.release()
