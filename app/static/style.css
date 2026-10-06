@@ -617,3 +617,33 @@ dialog .eyebrow{margin:0 0 8px}
 .verify-stats dt{color:var(--muted);margin-bottom:4px}
 .verify-stats dd{margin:0;font-weight:700;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
 @media (max-width:640px){.verify-grid{grid-template-columns:1fr}.verify-stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* ---- rule board: how close each rule is to firing ---------------------------------------------------------------------- */
+.rule-board{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,290px),1fr));gap:14px;margin:12px 0 4px}
+.rb-card{background:var(--glass-2);border:1px solid var(--line);border-radius:var(--r-card);padding:14px 14px 10px;box-shadow:var(--shadow-sm);min-width:0}
+.rb-head{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.rb-pill.met{background:var(--gain-bg);color:var(--gain)}
+.rb-price{margin:6px 0 4px}
+.rb-chart{display:block;width:100%;height:92px}
+.rb-close{fill:none;stroke:var(--accent);stroke-width:1.8;stroke-linejoin:round}
+.rb-sma{fill:none;stroke:var(--faint);stroke-width:1.2;stroke-dasharray:3 3}
+.rb-level{stroke:var(--warn);stroke-width:1.2;stroke-dasharray:5 4}
+.rb-band{stroke:var(--cyan);stroke-width:1.2;stroke-dasharray:5 4}
+.rb-now{fill:var(--gain-vivid);stroke:var(--panel-solid);stroke-width:1.5}
+.rb-legend{display:flex;flex-wrap:wrap;gap:4px 10px;margin:2px 0 8px}
+.rb-legend .lg::before,.rb-legend .lg.close::before{content:"";display:inline-block;width:12px;height:0;border-top:2px solid var(--accent);margin-right:4px;vertical-align:middle}
+.rb-legend .lg.sma::before{border-top:2px dashed var(--faint)}
+.rb-legend .lg.level::before{border-top:2px dashed var(--warn)}
+.rb-legend .lg.band::before{border-top:2px dashed var(--cyan)}
+.rb-legend .lg.now::before{width:8px;height:8px;border:0;border-radius:50%;background:var(--gain-vivid)}
+.rb-rules{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.rb-rule{display:grid;grid-template-columns:5.2em minmax(40px,1fr);gap:2px 8px;align-items:center;font-size:.86rem}
+.rb-rule .rb-text{grid-column:1/-1;color:var(--muted);font-size:.8rem}
+.rb-track{height:6px;border-radius:999px;background:var(--track);overflow:hidden}
+.rb-fill{display:block;height:100%;width:calc(var(--w,0)*1%);border-radius:999px;background:var(--faint)}
+.rb-rule.near .rb-fill{background:var(--warn)}
+.rb-rule.now .rb-fill,.rb-rule.met .rb-fill{background:var(--gain-vivid)}
+.rb-rule.met .rb-name,.rb-rule.now .rb-name{color:var(--gain);font-weight:600}
+.rb-rule.near .rb-name{color:var(--warn);font-weight:600}
+.rb-rule.off{opacity:.62}
+.rb-note{grid-column:1/-1;margin:0}

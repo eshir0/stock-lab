@@ -470,7 +470,48 @@ function renderIntel(s) {
   $('intel-status').textContent = '토스 공식 시장 정보 · ' + parts.join(' · ');
 }
 const gateReasons = {signal:'규칙 신호', requested:'직접 요청', no_signal:'신호 없음', recent:'최근 분석함', no_data:'일봉 부족', filtered:'연구로 제외한 신호뿐'};
+const ruleLabels = {golden_cross:'골든크로스', momentum:'모멘텀', mean_reversion:'평균회귀', breakout:'돌파'};
+function ruleChart(b, live, currency) {
+  const ch = b.chart, W = 300, H = 92, P = 4;
+  const lines = b.side === 'BUY' ? [ch.high20, ch.band_low] : [ch.low20, ch.band_high];
+  const vals = ch.close.concat(ch.sma20.filter(finite), lines.filter(finite), finite(live) ? [live] : []);
+  const lo = Math.min(...vals), hi = Math.max(...vals), span = hi - lo || 1;
+  const x = i => P + i * (W - 2 * P) / Math.max(1, ch.close.length - 1), y = v => H - P - (v - lo) / span * (H - 2 * P);
+  const path = arr => arr.map((v, i) => finite(v) ? `${x(i).toFixed(1)},${y(v).toFixed(1)}` : null).filter(Boolean).join(' ');
+  const level = (v, cls) => finite(v) ? `<line class="${cls}" x1="${P}" x2="${W - P}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"/>` : '';
+  const dot = finite(live) ? `<circle class="rb-now" cx="${W - P}" cy="${y(live).toFixed(1)}" r="3.5"/>` : '';
+  return `<svg class="rb-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="최근 60거래일 종가와 신호선"><polyline class="rb-sma" points="${path(ch.sma20)}"/>${level(lines[0], 'rb-level')}${level(lines[1], 'rb-band')}<polyline class="rb-close" points="${path(ch.close)}"/>${dot}</svg>`
+    + `<p class="rb-legend small muted"><span class="lg close">종가</span><span class="lg sma">20일선</span><span class="lg level">${b.side === 'BUY' ? '돌파선(20일 고가)' : '이탈선(20일 저가)'}</span><span class="lg band">${b.side === 'BUY' ? '평균회귀선(−2σ)' : '과열선(+2σ)'}</span><span class="lg now">현재가</span></p>`;
+}
+function renderRuleBoard(s) {
+  const checks = ((s.desk_gate || {}).checked || []).filter(c => c.board);
+  $('rule-board').hidden = !checks.length;
+  if (!checks.length) return;
+  setHtml('rule-board', checks.map(c => {
+    const b = c.board, q = (s.quotes || {})[c.symbol] || {}, inst = (s.instruments || []).find(i => i.symbol === c.symbol) || {};
+    const currency = inst.currency || (/^[0-9A-Z]{6}$/.test(c.symbol) ? 'KRW' : 'USD');
+    const live = finite(q.last) ? q.last : b.last_close;
+    const rows = b.rules.map(r => {
+      let state = 'far', text = '';
+      if (r.ignored) { state = 'off'; text = '연구로 제외 · AI를 부르지 않음'; }
+      else if (r.fired) { state = 'met'; text = '어제 종가 기준 충족'; }
+      else if (!finite(r.trigger)) { state = 'off'; text = r.rule === 'golden_cross' ? '이미 교차한 상태라 이번엔 불가' : '가까운 가격대에서 불가'; }
+      else {
+        const dist = (r.trigger / live - 1) * 100, meets = r.higher ? live >= r.trigger : live <= r.trigger;
+        state = meets ? 'now' : Math.abs(dist) <= 3 ? 'near' : 'far';
+        text = meets ? '지금 가격으로 마감하면 충족' : `${number(r.trigger, currency)}까지 ${dist > 0 ? '+' : ''}${dist.toFixed(1)}%`;
+      }
+      const dist = finite(r.trigger) ? Math.abs(r.trigger / live - 1) * 100 : null;
+      const close = state === 'met' || state === 'now' ? 100 : finite(dist) && state !== 'off' ? Math.max(4, 100 - dist * 10) : 0;
+      return `<li class="rb-rule ${state}"><span class="rb-name">${ruleLabels[r.rule] || r.rule}</span><div class="rb-track" aria-hidden="true"><i class="rb-fill" data-w="${close.toFixed(0)}"></i></div><span class="rb-text">${esc(text)}</span></li>`;
+    }).join('');
+    const met = b.rules.filter(r => !r.ignored && r.fired).length;
+    const head = met ? `<span class="pill rb-pill met">${b.side === 'BUY' ? '매수' : '매도'} 신호 ${met}개</span>` : `<span class="pill rb-pill">${b.side === 'BUY' ? '매수 신호 대기' : '보유 중 · 매도 신호 대기'}</span>`;
+    return `<article class="rb-card"><div class="rb-head"><div><strong>${esc(c.name)}</strong><span class="muted small"> ${esc(c.symbol)}</span></div>${head}</div><p class="rb-price"><b>${number(live, currency)}</b><span class="muted small"> 현재가 · 어제 종가 ${number(b.last_close, currency)}</span></p>${ruleChart(b, live, currency)}<ul class="rb-rules">${rows}</ul></article>`;
+  }).join('') + '<p class="rb-note small muted">트리거 가격은 "오늘 종가가 이 가격이면 규칙이 켜진다"는 뜻입니다(완료된 일봉 기준, 20분마다 계산). 실제 신호는 장 마감 뒤 완료된 일봉으로 판단합니다.</p>');
+}
 function renderGate(s) {
+  renderRuleBoard(s);
   const g = s.desk_gate || {}, scan = s.desk_scan || {}, month = s.strategy_mode === 'intraday' && s.strategy_settings?.horizon === 'month', show = month && !!(g.time || scan.time);
   $('gate-status').hidden = !show;
   if (!show) return;

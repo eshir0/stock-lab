@@ -89,3 +89,67 @@ def signals(candles):
         except (KeyError, TypeError, ValueError, ZeroDivisionError):
             result[name] = None
     return result
+
+
+# ---- how far each rule is from firing (the dashboard's rule board) ------------------------------------------------------------
+# For every rule the price at which the NEXT completed daily bar would make it fire, found by trying prices on the very same
+# rule functions (so the board can never disagree with the gate). A live quote compared with these prices shows how close
+# a name is. Nothing here trades or calls the AI.
+
+# rule -> {side: True when a HIGHER close moves it towards firing}
+_DIRECTION = {'golden_cross': {'BUY': True, 'SELL': False}, 'momentum': {'BUY': True, 'SELL': False},
+              'mean_reversion': {'BUY': False, 'SELL': True}, 'breakout': {'BUY': True, 'SELL': False}}
+
+
+def _with_close(candles, price):
+    last = candles[-1]
+    return candles+[{'open': price, 'high': price, 'low': price, 'close': price, 'volume': last.get('volume', 0)}]
+
+
+def trigger_price(candles, rule, side):
+    """The close of the next bar at which `rule` would say `side`, or None when no close within -60%..+150% would."""
+    fn, up = _FUNCTIONS[rule], _DIRECTION[rule][side]
+    last = candles[-1]['close']
+    fires = lambda p: fn(_with_close(candles, p)) == side
+    lo, hi = last*.4, last*2.5
+    if up:
+        if not fires(hi):
+            return None
+        if fires(lo):
+            return lo
+        for _ in range(60):
+            mid = (lo+hi)/2
+            lo, hi = (lo, mid) if fires(mid) else (mid, hi)
+        return math.ceil(hi*1e4)/1e4                  # rounded TOWARDS firing, so the shown price really fires
+    if not fires(lo):
+        return None
+    if fires(hi):
+        return hi
+    for _ in range(60):
+        mid = (lo+hi)/2
+        lo, hi = (mid, hi) if fires(mid) else (lo, mid)
+    return math.floor(lo*1e4)/1e4
+
+
+def board(candles, held, ignore=()):
+    """Per rule: the side that matters (SELL when held, BUY otherwise), whether it fired on the last completed bar, the
+    trigger price for the next bar, and whether the experiment ignores it; plus 60 bars and the reference lines for a chart."""
+    side = 'SELL' if held else 'BUY'
+    now = signals(candles)
+    rows = []
+    for rule in RULES:
+        rows.append({'rule': rule, 'side': side, 'fired': now.get(rule) == side,
+                     'trigger': trigger_price(candles, rule, side) if len(candles) >= 23 else None,
+                     'higher': _DIRECTION[rule][side], 'ignored': (not held) and rule in ignore})
+    closes = [c['close'] for c in candles]
+    window = closes[-20:]
+    mean = sum(window)/len(window)
+    sigma = _std(window)
+    tail = candles[-60:]
+    sma20 = [round(_sma(closes[:len(closes)-len(tail)+i+1], 20), 4) if len(closes)-len(tail)+i+1 >= 20 else None
+             for i in range(len(tail))]
+    return {'side': side, 'rules': rows, 'last_close': closes[-1], 'last_time': candles[-1].get('time'),
+            'chart': {'close': [round(c['close'], 4) for c in tail], 'sma20': sma20,
+                      'high20': round(max(c['high'] for c in candles[-20:]), 4) if all('high' in c for c in candles[-20:]) else None,
+                      'low20': round(min(c['low'] for c in candles[-20:]), 4) if all('low' in c for c in candles[-20:]) else None,
+                      'band_low': round(mean-Z_REVERSION*sigma, 4), 'band_high': round(mean+Z_REVERSION*sigma, 4)}}

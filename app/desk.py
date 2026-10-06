@@ -13,7 +13,7 @@ from .config import INSTRUMENTS as BASE_INSTRUMENTS
 from .instruments import INSTRUMENTS, SYMBOLS
 from .evaluation import mid, record_decision
 from .live.shadow import record_shadow
-from .rules import RULE_NAMES, signals
+from .rules import RULE_NAMES, board, signals
 from .performance import performance_summary
 from .providers import ProviderError
 from .risk import RiskError, horizon_of, is_etf, min_take_pct, round_trip_cost_pct, size_order, trailed_stop
@@ -158,9 +158,15 @@ class DeskMixin:
                 verdict = {'eligible': forced, 'reason': 'requested' if symbol == requested else 'no_data', 'rules': []}
                 problem = problem or f'완료된 일봉 {len(rows or [])}개 (필요 {history.MIN_BARS}개)'
             verdicts[symbol] = dict(verdict, signals=signal, held=held)
+            if rows is not None and len(rows) >= history.MIN_BARS:
+                try:
+                    verdicts[symbol]['board'] = board(rows, held, ignore)
+                except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                    pass                     # the board is a display aid; the gate decision above stands
             checks.append({'symbol': symbol, 'name': name, 'held': held, 'eligible': verdict['eligible'],
                            'reason': verdict['reason'], 'rules': verdict['rules'], 'filtered': verdict.get('filtered', []),
-                           'signals': {k: v for k, v in signal.items() if v}, **({'detail': problem} if problem else {})})
+                           'signals': {k: v for k, v in signal.items() if v}, **({'detail': problem} if problem else {}),
+                           **({'board': verdicts[symbol]['board']} if 'board' in verdicts[symbol] else {})})
             if verdict['eligible']:
                 eligible.append(cand)
         skipped = not eligible
