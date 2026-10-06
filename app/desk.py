@@ -920,7 +920,13 @@ class DeskMixin:
                 cost_bps=self.trade_cost_bps(symbol, fresh))
             self.plan_entry(s, symbol, decision, fresh, run, gen, time.time())
             if decision['stance'] == 'HOLD' or s['revision'] != rev:
-                event(s, SYMBOLS[symbol]['name']+' · 관망 또는 계좌 변경으로 체결하지 않습니다.')
+                if decision['stance'] != 'HOLD':
+                    why = '분석 중 계좌가 바뀌어(다른 체결·설정 변경) 이 판단으로는 주문하지 않습니다.'
+                elif (run.get('watch') or {}).get('status') == 'waiting':
+                    why = '최종 판단은 관망이라 지금 사지 않고, 등록한 조건 진입 가격을 기다립니다.'
+                else:
+                    why = '최종 판단이 관망이라 주문하지 않습니다.'
+                event(s, SYMBOLS[symbol]['name']+' · '+why)
                 return
             try:
                 proposal, sizing = self.place_desk_order(s, symbol, decision, fresh, gen=gen, rev=rev, run_id=run_id,
