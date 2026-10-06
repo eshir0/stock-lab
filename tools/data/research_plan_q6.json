@@ -1,0 +1,23 @@
+{
+  "registered": "2026-10-06 (KST), before the Korean statements were complete and before any Q6 variant was run",
+  "purpose": "Do earnings dates or simple fundamentals improve the site's buys? (research_plan.json Q6)",
+  "setup": {
+    "entries": "the site's rule signals with the research signal filter (app/gate.py RESEARCH_DROPS), stocks only (no ETFs), liquidity known at the entry",
+    "exit": "C (trailing stop, no sale at the target), stop 1.5 x ATR, take 1.5 x stop, 21 sessions, real costs (research.BASE)",
+    "universe": "US listed stocks with an SEC CIK; Korean listed and delisted stocks with DART data",
+    "information_known_at_the_entry": "a statement counts only if it was filed BEFORE the signal day; earnings dates are the actual release dates (US 8-K item 2.02, KR 영업(잠정)실적 disclosures), treated as known in advance because companies announce the schedule beforehand - an approximation stated in the report"
+  },
+  "split": {"develop": ["2016-01-01", "2020-12-31"], "holdout": ["2021-01-01", "2026-12-31"],
+            "why": "Korean statements start in 2015, so the 2006-2018 / 2019-2026 split of the other studies is not possible"},
+  "variants": {
+    "E0": "no change (base)",
+    "E5": "skip a buy when an earnings release falls within the next 5 trading days",
+    "E10": "within the next 10 trading days",
+    "E21": "within the next 21 trading days (the whole holding window)",
+    "P": "buy only if the latest quarterly AND the latest annual net income known at the entry are positive",
+    "G": "buy only if the latest quarter's revenue known at the entry is above the same quarter a year earlier",
+    "PG": "both P and G"
+  },
+  "adopt": "A variant is adopted only if, against E0, its develop mean per trade is at least 0.05 percentage points higher in BOTH markets, its holdout mean is higher in BOTH markets, and it keeps at least 30% of E0's develop trades. If several earnings variants (E5/E10/E21) pass, the one with the best average develop improvement; the same among P/G/PG. Otherwise nothing changes.",
+  "run": "automatically, once, by stocklab-data.service after the DART statements back to 2015 are complete (research_q6.py --if-ready); results in results/research-q6.json"
+}
