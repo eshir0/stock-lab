@@ -701,3 +701,7 @@ dialog .eyebrow{margin:0 0 8px}
 .car-prev .ic{transform:translateX(-1px)}
 .car-next .ic{transform:translateX(1px)}
 .rule-carousel{margin-top:18px}
+
+@media (hover: hover) and (pointer: fine){.car-track{cursor:grab}}
+.car-track.dragging{cursor:grabbing;user-select:none}
+.car-track.dragging *{pointer-events:none}

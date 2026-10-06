@@ -236,7 +236,7 @@ class DeskMixin:
         if state.get('strategy_mode') != 'intraday':
             return BASE_INSTRUMENTS
         settings = state['strategy_settings']
-        if settings.get('universe_mode', 'daily_focus') != 'daily_focus':
+        if settings.get('universe_mode', 'daily_focus') != 'daily_focus' and not self.scans_pool(state):
             include = settings.get('include_leveraged_etfs', False)
             return [i for i in INSTRUMENTS if include or not i.get('leveraged_etf')]
         symbols = self.buyable_symbols(state)

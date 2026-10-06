@@ -128,3 +128,23 @@ def test_a_pool_scan_experiment_has_no_focus_list(flagged, monkeypatch):
     assert '105560' in symbols and '069500' in symbols                       # the flagged name and the index ETF
     assert flagged.buyable_symbols(state) == state['signal_names']['KR']+state['signal_names'].get('US', [])
     assert not flagged.focus_allows(state, '069500') or '069500' in state['signal_names']['KR']
+
+
+def test_a_waiting_pullback_plan_keeps_its_name_buyable_after_the_signal_fades(flagged):
+    pool_mode(flagged)
+    with flagged.store.edit() as s:
+        s['signal_names'] = {'experiment_id': s['experiment_id'], 'time': time.time(), 'KR': [], 'US': []}
+        s['watches'] = [{'symbol': '105560', 'status': 'waiting'}, {'symbol': '000660', 'status': 'expired'}]
+    state = flagged.store.read()
+    assert '105560' in flagged.buyable_symbols(state) and flagged.focus_allows(state, '105560')
+    assert '000660' not in flagged.buyable_symbols(state)
+
+
+def test_the_pool_scan_wins_over_a_fixed_universe(flagged):
+    pool_mode(flagged)
+    with flagged.store.edit() as s:
+        s['strategy_settings']['universe_mode'] = 'fixed'
+    flagged.scan_pool()
+    state = flagged.store.read()
+    assert flagged.scans_pool(state) and '105560' in [i['symbol'] for i in flagged.active_instruments(state)]
+    assert not flagged.focus_allows(state, '000660')                     # a fixed-lineup name without a signal

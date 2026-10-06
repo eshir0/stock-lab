@@ -75,8 +75,11 @@ class FocusMixin:
         symbols = []
         for market in MARKETS:
             if self.scans_pool(state):
-                # No focus list: the rules over the whole pool decide what is worth a look.
-                symbols += self.signal_symbols(state, market, now)
+                # No focus list: the rules over the whole pool decide what is worth a look. A name with a waiting
+                # conditional entry stays too: a pullback plan waits for exactly the dip that turns its signal off.
+                waiting = [w['symbol'] for w in state.get('watches') or [] if w.get('status') == 'waiting'
+                           and SYMBOLS.get(w.get('symbol'), {}).get('market') == market]
+                symbols += [s for s in self.signal_symbols(state, market, now)+waiting if s not in symbols]
                 continue
             picks = self.focus_symbols(state, market, now)
             symbols += self.fixed_symbols(state, market) if picks is None else picks
@@ -90,8 +93,7 @@ class FocusMixin:
 
     @staticmethod
     def scans_pool(state):
-        return (state.get('strategy_mode') == 'intraday' and universe_mode(state) == 'daily_focus'
-                and (state.get('strategy_settings') or {}).get('scan') == 'pool')
+        return state.get('strategy_mode') == 'intraday' and (state.get('strategy_settings') or {}).get('scan') == 'pool'
 
     def signal_symbols(self, state, market, now=None):
         if not self.scans_pool(state):
@@ -167,6 +169,8 @@ class FocusMixin:
                 event(s, '규칙 신호가 켜진 종목을 감시 대상에 추가했습니다(후보 전체 확인): '+', '.join(added))
 
     def focus_allows(self, state, symbol):
+        if self.scans_pool(state):
+            return symbol in self.buyable_symbols(state)
         if state.get('strategy_mode') != 'intraday' or universe_mode(state) != 'daily_focus':
             return True
         return symbol in self.buyable_symbols(state)

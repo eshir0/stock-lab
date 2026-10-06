@@ -184,7 +184,7 @@ $('experiment-open').onclick = () => {
 };
 // The holding limit is typed in days for a month plan and in minutes for a same-session one; the server always gets minutes.
 const horizons = {
-  month: {label:'최대 보유 기간 · 일', min:1, max:30, value:30, unit:1440, orderPct:30, positionPct:30, text:'종목을 밤새 들고 가며 최대 30일 안에 가장 큰 이익을 노립니다. 최근 3개월 일봉과 규칙 신호를 함께 보고, 가격이 목표의 절반에 닿으면 손절가를 올려 이익을 지킵니다(추적 손절). 장 마감 전에 청산하지 않습니다. 오늘의 집중 종목은 상승 추세 종목 위주로 고릅니다.'},
+  month: {label:'최대 보유 기간 · 일', min:1, max:30, value:30, unit:1440, orderPct:30, positionPct:30, text:'종목을 밤새 들고 가며 최대 30일 안에 가장 큰 이익을 노립니다. 규칙 신호가 켜진 종목만 분석하고, 가격이 목표의 절반에 닿으면 손절가를 올려 이익을 지킵니다(추적 손절). 장 마감 전에 청산하지 않습니다. AI는 최근 3개월 일봉과 함께 상장 이후 장기 요약도 봅니다.'},
 };
 function updateHorizonForm(reset) {
   const h = horizons[$('horizon').value] || horizons.month, input = $('max-holding');
@@ -379,7 +379,7 @@ function render() {
   setHtml('events', s.events.slice(-15).reverse().map(e => `<div class="event ${e.level === 'warning' ? 'warning' : ''}"><time>${clock(e.time)}</time><p>${esc(e.message)}</p></div>`).join(''));
   setHtml('trades', s.trades.slice().reverse().map(t => `<tr><td>${dateTime(t.time)}</td><td>${esc(s.instruments.find(i => i.symbol === t.symbol)?.name || t.symbol)}</td><td>${t.side === 'BUY' ? '매수' : '매도'}</td><td>${t.liquidation || t.execution_mode === 'liquidation' ? '전량매도' : t.entry_watch ? (t.execution_mode === 'auto' ? '조건 진입' : '조건 진입 · 승인') : t.execution_mode === 'auto' ? '자동' : '직접 승인'}</td><td>${t.quantity}주</td><td>${number(t.price,t.currency)}</td><td>${number(t.fee,t.currency)}</td><td class="${t.realized >= 0 ? 'gain' : 'loss'}">${t.side === 'SELL' ? number(t.realized,t.currency) : '—'}</td><td>${esc(t.exit_reason ? exitNames[t.exit_reason] || t.exit_reason : '—')}</td></tr>`).join('') || '<tr><td colspan="9" class="empty-cell">모의매매가 체결되면 이곳에 기록됩니다.</td></tr>');
   const rh = s.config.regular_hours;
-  $('cost-note').textContent = (rh ? `매수·매도는 정규장에서만 합니다: ${rh.KR.label} ${rh.KR.kst}(종가 동시호가 제외) · ${rh.US.label} ${rh.US.kst}(한국 시간, 프리마켓·애프터마켓 제외). ` : '') + `비용은 실제 요율 기준입니다: 수수료 국내 ${s.config.fee_kr_bps}bp · 미국 ${s.config.fee_us_bps}bp(주문 10달러 이하 무료), 국내 주식 매도 거래세 ${s.config.sell_tax_kr_bps}bp(ETF 면제), 슬리피지 가정 ${s.config.slippage_bps}bp. 1bp = 0.01%. 익절은 목표가에 지정가로, 손절은 그때의 호가로 체결합니다. 자동 환전은 하지 않습니다.` + (s.config.min_take_cost_ratio > 0 ? ` 익절 폭이 왕복 비용(수수료·슬리피지·세금·스프레드)의 ${s.config.min_take_cost_ratio}배 미만인 매수는 서버가 거부합니다.` : '');
+  $('cost-note').textContent = (rh ? `매수·매도는 정규장에서만 합니다: ${rh.KR.label} ${rh.KR.kst}(종가 동시호가 제외) · ${rh.US.label} ${rh.US.kst}(한국 시간, 프리마켓·애프터마켓 제외). ` : '') + `비용은 실제 요율 기준입니다: 수수료 국내 ${s.config.fee_kr_bps}bp · 미국 ${s.config.fee_us_bps}bp(주문 10달러 이하 무료), 국내 주식 매도 거래세 ${s.config.sell_tax_kr_bps}bp(ETF 면제), 슬리피지 가정 ${s.config.slippage_bps}bp. 1bp = 0.01%. ${s.strategy_settings?.exit_mode === 'trail' ? '익절가에 닿아도 팔지 않고 최고가를 따라 올라가는 추적 손절이나 보유 기한에 청산합니다' : '익절은 목표가에 지정가로 체결합니다'}. 손절은 그때의 호가로 체결합니다. 자동 환전은 하지 않습니다.` + (s.config.min_take_cost_ratio > 0 ? ` 익절 폭이 왕복 비용(수수료·슬리피지·세금·스프레드)의 ${s.config.min_take_cost_ratio}배 미만인 매수는 서버가 거부합니다.` : '');
   drawChart();
   drawSpark('spark-kr', 'KRW');
   drawSpark('spark-us', 'USD');
@@ -438,9 +438,9 @@ function reportExtras(report) {
   if (report.role === 'selector' && Array.isArray(report.inputs) && report.inputs.length) {
     const fmt = (x, d = 2, suffix = '') => finite(x) ? x.toFixed(d) + suffix : '—';
     const shares = x => finite(x) ? (x > 0 ? '+' : '') + x.toLocaleString() : '—';
-    html += '<div class="briefing"><h4>AI가 본 후보 지표</h4><div class="table-wrap"><table class="eval-table"><thead><tr><th>종목</th><th>20분</th><th>변동성</th><th>거래량비</th><th>스프레드</th><th>거래량 순위</th><th>외국인 순매수</th><th>기관 순매수</th></tr></thead><tbody>'
-      + report.inputs.map(i => `<tr><td>${esc(i.symbol)}${i.symbol === report.symbol ? ' ✓' : ''}</td><td>${fmt(i.return_20m_pct, 2, '%')}</td><td>${fmt(i.volatility_1m_pct, 3, '%')}</td><td>${fmt(i.volume_ratio_5m, 2, '배')}</td><td>${fmt(i.spread_bps, 1, 'bp')}</td><td>${esc(i.rankings ? i.rankings.volume_rank : '—')}</td><td>${shares(i.investor_flows?.foreigner_net_shares)}</td><td>${shares(i.investor_flows?.institution_net_shares)}</td></tr>`).join('')
-      + '</tbody></table></div><p class="small muted">순위·수급은 토스 공식 조회 API 값입니다(수급은 국내 종목, 당일은 잠정치일 수 있음). "—"는 조회되지 않았다는 뜻입니다.</p></div>';
+    html += '<div class="briefing"><h4>AI가 본 후보 지표</h4><div class="table-wrap"><table class="eval-table"><thead><tr><th>종목</th><th>1주</th><th>1개월</th><th>3개월</th><th>3개월 고점 대비</th><th>하루 변동폭</th><th>신호</th><th>스프레드</th></tr></thead><tbody>'
+      + report.inputs.map(i => `<tr><td>${esc(i.symbol)}${i.symbol === report.symbol ? ' ✓' : ''}</td><td>${fmt(i.daily?.ret_1w_pct, 1, '%')}</td><td>${fmt(i.daily?.ret_1m_pct, 1, '%')}</td><td>${fmt(i.daily?.ret_3m_pct, 1, '%')}</td><td>${fmt(i.daily?.from_high_pct, 1, '%')}</td><td>${fmt(i.daily?.atr_pct, 2, '%')}</td><td>${esc((i.rule_triggers || []).join('·') || '—')}</td><td>${fmt(i.spread_bps, 1, 'bp')}</td></tr>`).join('')
+      + '</tbody></table></div><p class="small muted">수익률·변동폭은 완료된 일봉에서 서버가 계산한 값입니다. "—"는 값이 없다는 뜻입니다.</p></div>';
   }
   if (report.role === 'selector' && Array.isArray(report.ranking) && report.ranking.length) html += '<div class="briefing"><h4>후보 순위</h4><dl>' + report.ranking.map((item, index) => `<div><dt>${index + 1}. ${esc(item.symbol)}${item.symbol === report.symbol ? ' ✓' : ''}</dt><dd>${esc(item.reason)}</dd></div>`).join('') + '</dl></div>';
   if (Array.isArray(report.tasks) && report.tasks.length) html += '<div class="briefing"><h4>역할별 조사 지시</h4><dl>' + report.tasks.map(task => `<div><dt>${esc(names[task.role] || task.role)}</dt><dd>${esc(task.instruction)}</dd></div>`).join('') + '</dl></div>';
@@ -882,6 +882,41 @@ function setupCarousel(root) {
   dots.addEventListener('click', e => { const b = e.target.closest('.car-dot'); if (b) go([...dots.children].indexOf(b)); });
   track.addEventListener('keydown', e => { if (e.key === 'ArrowRight') { go(current() + 1); e.preventDefault(); } if (e.key === 'ArrowLeft') { go(current() - 1); e.preventDefault(); } });
   track.tabIndex = 0;
+  // Press and drag with the mouse (touch and trackpads scroll natively). On release the card glides to the next one in the
+  // drag's direction when the drag was long or quick enough, otherwise back to where it was. A drag never clicks.
+  let drag = null, moved = false;
+  track.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'mouse' || e.button !== 0) return;
+    cancelAnimationFrame(anim);
+    drag = {x: e.clientX, left: track.scrollLeft, from: current(), t: performance.now(), id: e.pointerId};
+    moved = false;
+  });
+  track.addEventListener('pointermove', e => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.x;
+    if (!moved && Math.abs(dx) > 5) {
+      moved = true;
+      track.setPointerCapture(drag.id);
+      track.classList.add('dragging');
+      track.style.setProperty('scroll-snap-type', 'none');
+    }
+    if (moved) { track.scrollLeft = drag.left - dx; e.preventDefault(); }
+  });
+  const release = e => {
+    if (!drag || (e && e.pointerId !== drag.id)) return;
+    const d = drag;
+    drag = null;
+    if (!moved) return;
+    track.classList.remove('dragging');
+    const dx = (e ? e.clientX : d.x) - d.x, speed = Math.abs(dx) / Math.max(1, performance.now() - d.t);
+    const far = Math.abs(dx) > track.clientWidth * .18 || speed > .45;
+    go(far ? d.from + (dx < 0 ? 1 : -1) : d.from);
+    setTimeout(() => track.style.removeProperty('scroll-snap-type'), 600);
+  };
+  track.addEventListener('pointerup', release);
+  track.addEventListener('pointercancel', release);
+  track.addEventListener('click', e => { if (moved) { e.preventDefault(); e.stopPropagation(); moved = false; } }, true);
+  track.addEventListener('dragstart', e => e.preventDefault());
   new MutationObserver(paint).observe(track, {childList: true});
   new ResizeObserver(paint).observe(track);
   paint();
