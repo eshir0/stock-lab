@@ -17,7 +17,7 @@ from .desk import DESK_CALLS
 from .instruments import CATALOGUE, INSTRUMENTS, SYMBOLS
 from .providers import ProviderError, RateLimited
 from .risk import horizon_of, is_etf
-from .rules import signals as rule_signals
+from .rules import board as rule_board, signals as rule_signals
 from .store import event
 
 MARKETS = ('KR', 'US')
@@ -74,6 +74,10 @@ class FocusMixin:
         flagged on its last completed daily bar."""
         symbols = []
         for market in MARKETS:
+            if self.scans_pool(state):
+                # No focus list: the rules over the whole pool decide what is worth a look.
+                symbols += self.signal_symbols(state, market, now)
+                continue
             picks = self.focus_symbols(state, market, now)
             symbols += self.fixed_symbols(state, market) if picks is None else picks
             symbols += [s for s in self.signal_symbols(state, market, now) if s not in symbols]
@@ -115,7 +119,7 @@ class FocusMixin:
         mode = settings.get('signal_filter', 'all')
         risk = self.risk_budget(state) or {}
         held = set(state.get('positions') or {})
-        found, checked = {}, 0
+        found, checked, overview = {}, 0, []
         for market in MARKETS:
             currency = 'KRW' if market == 'KR' else 'USD'
             if (state.get('initial') or {}).get(currency, 0) <= 0:
@@ -123,7 +127,7 @@ class FocusMixin:
             names = []
             for item in CATALOGUE:
                 symbol = item['symbol']
-                if item['market'] != market or symbol in held or (item.get('leveraged_etf') and not include):
+                if item['market'] != market or (item.get('leveraged_etf') and not include):
                     continue
                 try:
                     rows = self.daily_bars(symbol, now)
@@ -133,6 +137,14 @@ class FocusMixin:
                     continue
                 checked += 1
                 ignore = gate.dropped(mode, market, is_etf(symbol))
+                try:                                      # the dashboard's one-line-per-name overview (no chart)
+                    b = rule_board(rows, symbol in held, ignore, sells_off=symbol in held)
+                    overview.append({'symbol': symbol, 'name': item['name'], 'market': market, 'currency': item['currency'],
+                                     'held': symbol in held, 'side': b['side'], 'last_close': b['last_close'], 'rules': b['rules']})
+                except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                    pass
+                if symbol in held:
+                    continue
                 fired = [r for r, v in rule_signals(rows).items() if v == 'BUY' and r not in ignore]
                 if not fired:
                     continue
@@ -149,6 +161,7 @@ class FocusMixin:
                 return
             before = s.get('signal_names') or {}
             s['signal_names'] = {'experiment_id': s['experiment_id'], 'time': now, 'checked': checked, **found}
+            s['pool_board'] = {'experiment_id': s['experiment_id'], 'time': now, 'rows': overview}
             added = [SYMBOLS[x]['name'] for m in MARKETS for x in found.get(m, []) if x not in (before.get(m) or [])]
             if added:
                 event(s, '규칙 신호가 켜진 종목을 감시 대상에 추가했습니다(후보 전체 확인): '+', '.join(added))
@@ -198,8 +211,8 @@ class FocusMixin:
     def refresh_focus(self):
         """One pass of the focus loop. Cheap when nothing is due; never blocks quotes, exits or trading."""
         state = self.store.read()
-        if state.get('strategy_mode') != 'intraday' or universe_mode(state) != 'daily_focus':
-            return
+        if state.get('strategy_mode') != 'intraday' or universe_mode(state) != 'daily_focus' or self.scans_pool(state):
+            return                     # a pool-scan experiment builds no focus list (and makes no morning AI briefing)
         now = time.time()
         for market in MARKETS:
             window = self.market_window(state, market, now)

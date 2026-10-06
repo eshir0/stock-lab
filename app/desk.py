@@ -241,6 +241,11 @@ class DeskMixin:
             return [i for i in INSTRUMENTS if include or not i.get('leveraged_etf')]
         symbols = self.buyable_symbols(state)
         symbols += [s for s in state.get('positions', {}) if s not in symbols]
+        if self.scans_pool(state):
+            # The two index ETFs are always quoted (sessions, the dashboard); like any pool name they are analysed and
+            # bought only on a rule signal.
+            symbols += [s for s in ('069500', 'SPY') if s not in symbols and s in SYMBOLS
+                        and (state.get('initial') or {}).get(SYMBOLS[s]['currency'], 0) > 0]
         return [SYMBOLS[s] for s in symbols if s in SYMBOLS]
 
     def update_desk_risk(self, state, now=None):

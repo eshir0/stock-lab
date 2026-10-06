@@ -105,3 +105,26 @@ def test_held_names_are_left_to_the_exit_rules_on_sell_signals():
     from test_rule_board import series
     b = rules.board(series(1), held=True, sells_off=True)
     assert all(r['ignored'] for r in b['rules'])
+
+
+def test_the_scan_keeps_a_one_line_overview_of_every_pool_name(flagged):
+    pool_mode(flagged)
+    flagged.scan_pool()
+    rows = flagged.store.read()['pool_board']['rows']
+    assert len(rows) >= 10 and all(len(r['rules']) == 4 and 'chart' not in r for r in rows)
+    kb = next(r for r in rows if r['symbol'] == '105560')
+    assert kb['side'] == 'BUY' and kb['market'] == 'KR' and kb['last_close'] == 61000.0
+
+
+def test_a_pool_scan_experiment_has_no_focus_list(flagged, monkeypatch):
+    pool_mode(flagged)
+    built = []
+    monkeypatch.setattr(flagged, 'build_focus', lambda *a, **k: built.append(a))
+    flagged.refresh_focus()
+    assert built == []                                                       # no list, no morning AI briefing
+    flagged.scan_pool()
+    state = flagged.store.read()
+    symbols = [i['symbol'] for i in flagged.active_instruments(state)]
+    assert '105560' in symbols and '069500' in symbols                       # the flagged name and the index ETF
+    assert flagged.buyable_symbols(state) == state['signal_names']['KR']+state['signal_names'].get('US', [])
+    assert not flagged.focus_allows(state, '069500') or '069500' in state['signal_names']['KR']

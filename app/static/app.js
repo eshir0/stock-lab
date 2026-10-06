@@ -365,6 +365,7 @@ function render() {
   renderLive(s);
   renderIntel(s);
   renderGate(s);
+  renderPoolBoard(s);
   renderFocus(s);
   setHtml('positions', Object.entries(s.positions).map(([symbol,p]) => {
     const i = s.instruments.find(i => i.symbol === symbol), q = s.quotes[symbol], pnl = q ? q.last * p.quantity - (p.cost_basis ?? p.average * p.quantity) : null;
@@ -510,6 +511,43 @@ function renderRuleBoard(s) {
     const head = met ? `<span class="pill rb-pill met">${b.side === 'BUY' ? '매수' : '매도'} 신호 ${met}개</span>` : `<span class="pill rb-pill">${b.side === 'BUY' ? '매수 신호 대기' : '보유 중 · 매도 신호 대기'}</span>`;
     return `<article class="rb-card"><div class="rb-head"><div><strong>${esc(c.name)}</strong><span class="muted small"> ${esc(c.symbol)}</span></div>${head}</div><p class="rb-price"><b>${number(live, currency)}</b><span class="muted small"> 현재가 · 어제 종가 ${number(b.last_close, currency)}</span></p>${ruleChart(b, live, currency)}<ul class="rb-rules">${rows}</ul></article>`;
   }).join('') + '<p class="rb-note small muted">트리거 가격은 "오늘 종가가 이 가격이면 규칙이 켜진다"는 뜻입니다(완료된 일봉 기준, 20분마다 계산). 실제 신호는 장 마감 뒤 완료된 일봉으로 판단합니다.</p>');
+}
+function ruleState(r, live) {
+  if (r.ignored) return {state: 'off', dist: null, text: r.side === 'SELL' ? '참고용' : '연구로 제외'};
+  if (r.fired) return {state: 'met', dist: 0, text: '어제 종가 기준 충족'};
+  if (!finite(r.trigger) || !finite(live)) return {state: 'off', dist: null, text: '이번엔 불가'};
+  const dist = (r.trigger / live - 1) * 100, meets = r.higher ? live >= r.trigger : live <= r.trigger;
+  return {state: meets ? 'now' : Math.abs(dist) <= 3 ? 'near' : 'far', dist, text: meets ? '지금 가격으로 마감하면 충족' : ''};
+}
+function renderPoolBoard(s) {
+  const pool = s.strategy_settings?.scan === 'pool';
+  $('sec-focus').hidden = pool;
+  const pb = s.pool_board || {}, rows = pb.rows || [];
+  if (!rows.length) {
+    $('pool-count').textContent = '확인 전';
+    setHtml('pool-board', `<p class="small muted">${pool ? '실행 중일 때 30분마다 후보 전체를 확인합니다. 첫 확인을 기다리는 중입니다.' : '이 실험은 오늘의 집중 종목만 확인합니다. 아래 "확인한 종목 자세히"에서 볼 수 있습니다.'}</p>`);
+    return;
+  }
+  const order = {met: 0, now: 1, near: 2, far: 3, off: 4};
+  const items = rows.map(row => {
+    const q = (s.quotes || {})[row.symbol] || {}, fresh = finite(q.last) && finite(q.received) && Date.now() / 1000 - q.received < 120;
+    const live = fresh ? q.last : row.last_close;
+    const states = row.rules.map(r => ({r, ...ruleState(r, live)}));
+    const usable = states.filter(x => x.state !== 'off');
+    const best = usable.sort((a, b) => order[a.state] - order[b.state] || Math.abs(a.dist ?? 999) - Math.abs(b.dist ?? 999))[0];
+    return {row, live, livePrice: fresh, best};
+  }).sort((a, b) => (a.row.held - b.row.held) || order[a.best?.state || 'off'] - order[b.best?.state || 'off'] || Math.abs(a.best?.dist ?? 999) - Math.abs(b.best?.dist ?? 999));
+  const fired = items.filter(x => x.best && (x.best.state === 'met')).length;
+  $('pool-count').textContent = `신호 ${fired}개 · ${rows.length}종목 · ${clock(pb.time)} 확인`;
+  const body = items.map(({row, live, livePrice, best}) => {
+    const st = row.held ? 'held' : best ? best.state : 'off';
+    const label = row.held ? '보유 중 · 청산 규칙이 관리' : !best ? '쓸 수 있는 신호 없음' : best.state === 'met' ? '신호 켜짐 · AI 분석 대상' : best.state === 'now' ? '지금 가격이면 켜짐' : best.state === 'near' ? '근접 (3% 이내)' : '멂';
+    const rule = row.held || !best ? '—' : `${ruleLabels[best.r.rule]}${best.r.higher ? ' ↑' : ' ↓'}`;
+    const dist = row.held || !best ? '—' : best.state === 'met' ? '충족' : finite(best.dist) ? `${number(best.r.trigger, row.currency)} (${best.dist > 0 ? '+' : ''}${best.dist.toFixed(1)}%)` : '—';
+    return `<tr class="pb-row ${st}"><td><span class="pb-mkt">${row.market === 'KR' ? '국내' : '미국'}</span></td><td><b>${esc(row.name)}</b><small class="muted"> ${esc(row.symbol)}</small></td><td>${number(live, row.currency)}${livePrice ? '' : '<small class="muted"> 종가</small>'}</td><td>${rule}</td><td>${dist}</td><td><span class="pb-state ${st}">${label}</span></td></tr>`;
+  }).join('');
+  setHtml('pool-board', `<div class="table-wrap"><table class="pool-table"><thead><tr><th>시장</th><th>종목</th><th>가격</th><th>가장 가까운 신호</th><th>트리거 가격 (남은 거리)</th><th>상태</th></tr></thead><tbody>${body}</tbody></table></div>`
+    + '<p class="small muted pb-note">↑ 가격이 올라야 켜지는 신호 · ↓ 내려야 켜지는 신호. 신호 판단은 완료된 일봉 기준이고, 실시간 가격은 감시 중인 종목만 표시합니다(나머지는 어제 종가).</p>');
 }
 function renderGate(s) {
   renderRuleBoard(s);
