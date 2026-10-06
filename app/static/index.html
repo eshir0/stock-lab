@@ -108,7 +108,7 @@
 <p>현재 실험의 잔고·보유 종목·거래 기록을 종료 시점 그대로 보관합니다. 보유 종목을 매도하지 않으며 새 실험으로 넘기지 않습니다. 실행 방식(사용자 승인 / 자동 모의체결)은 지금 실험과 같게 이어집니다.</p>
 <label class="field-label" for="experiment-input-name">실험 이름</label><input id="experiment-input-name" name="name" maxlength="80" placeholder="예: 1개월 스윙 실험 1차" required>
 <div class="seed-inputs"><div><label class="field-label" for="seed-krw">국내 가상 원금 · 원</label><input id="seed-krw" name="seed_krw" type="number" min="0" max="1000000000000" step="1" value="7000000" required inputmode="numeric"></div><div><label class="field-label" for="seed-usd">미국 가상 원금 · 달러</label><input id="seed-usd" name="seed_usd" type="number" min="0" max="1000000000" step="0.01" value="750" required inputmode="decimal"></div></div>
-<p class="muted small">기본값은 시장별 최소 권장 원금입니다. 국내 700만 원: 1주 단위라 이보다 적으면 국내 후보 16개 중 살 수 있는 종목이 10~11개로 줄고 대부분 1주(1,000만 원이면 종목당 3주 안팎). 미국 750달러(약 100만 원): 소수점 거래라 모든 종목을 살 수 있고 종목당 최소 약 50달러. 두 시장의 성과를 따로 보고 한 곳을 고르는 용도입니다.</p>
+<p class="muted small">기본값은 시장별 최소 권장 원금입니다. 국내 700만 원: 1주 단위라 1주만 사도 손절 시 손실이 거래당 위험 한도(원금의 0.5%)를 넘는 고가 종목은 빠집니다. 2026-10-07 가격으로 국내 후보 15개 중 12개를 살 수 있고(SK하이닉스·한화에어로스페이스·삼성바이오로직스 제외, 이 셋까지 사려면 약 1,500만 원), 이보다 적으면 더 줄어듭니다. 빠진 종목은 신호 현황 표에 "이 원금으로는 살 수 없음"으로 표시됩니다. 미국 750달러(약 100만 원): 소수점 거래라 모든 종목을 살 수 있고 종목당 최소 약 50달러. 두 시장의 성과를 따로 보고 한 곳을 고르는 용도입니다.</p>
 <label class="field-label" for="strategy-mode">분석 전략</label><select id="strategy-mode" name="strategy_mode"><option value="intraday">전문가팀 · 종목 선정과 위험 관리</option><option value="legacy">기본 분석 · 기존 방식</option></select>
 <p id="strategy-form-description" class="muted small">플래너 → 기업·차트·뉴스 조사 → 반대 검토 → 디렉터 순서로 분석하고, 목표 비중과 손절 위험을 바탕으로 수량을 정합니다.</p>
 <fieldset id="intraday-settings" class="strategy-fields"><legend>매매 기간과 위험 기준</legend>

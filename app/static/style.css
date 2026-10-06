@@ -656,12 +656,14 @@ dialog .eyebrow{margin:0 0 8px}
 .pool-table th,.pool-table td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--line-2);white-space:nowrap}
 .pool-table th{color:var(--muted);font-weight:600;font-size:.8rem}
 .pool-table tr.pb-row.met td,.pool-table tr.pb-row.now td{background:var(--gain-soft)}
-.pool-table tr.pb-row.off{opacity:.7}
+.pool-table tr.pb-row.off,.pool-table tr.pb-row.blocked{opacity:.7}
 .pb-mkt{display:inline-block;padding:1px 7px;border-radius:999px;background:var(--track);color:var(--ink-2);font-size:.75rem}
 .pb-state{display:inline-block;padding:2px 9px;border-radius:999px;font-size:.78rem;background:var(--track);color:var(--muted)}
 .pb-state.met,.pb-state.now{background:var(--gain-bg);color:var(--gain);font-weight:600}
 .pb-state.near{background:var(--warn-bg);color:var(--warn);font-weight:600}
 .pb-state.held{background:var(--row-hover);color:var(--accent)}
+.pb-state.blocked{background:var(--track);color:var(--loss)}
+.pb-why{display:block;margin-top:3px;font-size:.72rem;line-height:1.45;max-width:260px}
 .pb-note{margin:8px 0 0}
 
 .why-tag{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:999px;font-size:.72rem;vertical-align:middle;background:var(--track);color:var(--muted)}

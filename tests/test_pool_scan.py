@@ -62,7 +62,11 @@ def test_a_share_that_risks_more_than_one_trade_may_lose_is_left_out(flagged):
     with flagged.store.edit() as s:
         s['strategy_settings']['risk_per_trade_pct'] = .1                     # 1M KRW x 0.1% = 1,000 KRW per trade
     flagged.scan_pool()
-    assert '105560' not in flagged.store.read()['signal_names']['KR']
+    state = flagged.store.read()
+    assert '105560' not in state['signal_names']['KR']
+    row = next(r for r in state['pool_board']['rows'] if r['symbol'] == '105560')     # and the overview says why
+    assert '거래당 위험 한도' in row['unaffordable']
+    assert all('unaffordable' not in r for r in state['pool_board']['rows'] if r['currency'] == 'USD')   # fractional shares fit
 
 
 def test_focus_mode_and_saved_experiments_do_not_scan(flagged):
