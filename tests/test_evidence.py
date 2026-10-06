@@ -55,6 +55,17 @@ def test_the_summary_counts_the_archive_numbers():
     assert evidence.for_ai(None, [])['available'] is False
 
 
+def test_near_zero_numbers_are_flat_and_analogs_count_against_the_usual_drift():
+    """SMH on 2026-10-06: momentum's market mean was -0.38% (CI below zero), the rest about zero, and the analogs' +2.13%
+    was just the ETF's usual climb - it used to read "for, 3 to 1"."""
+    smh = pack(group=(-0.38, 0.031), own=0.03, analog=(2.13, 818))
+    assert evidence.summary(smh, ['momentum'])['sign'] == 'against'                        # no baseline: analogs do not vote
+    smh['analogs']['baseline_forward_21d'] = {'n': 4000, 'mean_pct': 1.9}
+    assert evidence.summary(smh, ['momentum']) == {'sign': 'against', 'up': 0, 'down': 1, 'flat': 3, 'as_of': smh['as_of_bar']}
+    smh['analogs']['baseline_forward_21d']['mean_pct'] = 0.9                                # analogs clearly beat the usual
+    assert evidence.summary(smh, ['momentum'])['sign'] == 'mixed'
+
+
 def test_an_analysis_carries_the_pack_and_records_its_verdict(desk, tmp_path, monkeypatch):
     write(tmp_path, pack())
     desk.evidence = EvidenceStore(tmp_path)

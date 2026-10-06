@@ -158,8 +158,12 @@ def own(df, market, etf):
         same = (np.all([sig[k].to_numpy() for k in firing], axis=0)
                 & (~np.any([sig[k].to_numpy() for k in quiet], axis=0) if quiet else True) & since & (up == up[-1]))
         same[-1] = False
+        # What ANY day of this name in the same market regime went on to do: an analog result only says something about
+        # the signal when it differs from this baseline (a long-rising ETF goes up after almost anything).
+        usual = since & (up == up[-1])
+        usual[-1] = False
         out['analogs'] = {'rules': firing, 'index_above_sma200': bool(up[-1]), 'forward_21d': dist(fwd21[same]),
-                          'forward_5d': dist(fwd5[same])}
+                          'forward_5d': dist(fwd5[same]), 'baseline_forward_21d': dist(fwd21[usual])}
     # Where the name stands now (completed bar): drawdown from the 1-year high, 1-month and 3-month returns, ATR.
     out['now'] = {'close': r(df['close'].iloc[-1], 4), 'ret_1m_pct': r((c[-1]/c[-22]-1)*100), 'ret_3m_pct': r((c[-1]/c[-64]-1)*100),
                   'from_1y_high_pct': r((c[-1]/c[-252:].max()-1)*100), 'atr14_pct': r(atr[-1]*100)}

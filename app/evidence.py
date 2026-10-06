@@ -5,7 +5,7 @@ only reads them: a pack that is missing, unreadable, for another symbol or older
 and the analysis goes on without it (the AI is told so). Nothing here can size or place an order.
 
 `for_ai` puts the facts about the rules that started this analysis first; `summary` condenses them into a sign
-('for' | 'against' | 'mixed') stored with the decision and the trade, so the scorecard can later compare decisions that
+('for' | 'against' | 'mixed', near-zero numbers counted as flat) stored with the decision and the trade, so the scorecard can later compare decisions that
 followed the evidence with those that went against it.
 """
 import json
@@ -75,20 +75,30 @@ def triggers(pack, rules):
     return out
 
 
+FLAT_PCT = .1           # a per-trade mean after costs closer to zero than this is a draw, not a vote either way
+FLAT_ANALOG_PCT = .5    # the same for the analogs' 21-day excess over the name's usual 21 days (a noisier number)
+
+
 def summary(pack, rules):
-    """{'sign', 'votes', 'as_of'}: how many of the archive's numbers point up or down for the triggering rules."""
+    """{'sign', 'up', 'down', 'flat', 'as_of'}: how many of the archive's numbers point up or down for the triggering rules.
+
+    Each rule gives three votes (the market's 2006-2018 and 2019-2026 means, this name's replay), all per trade after
+    costs; a mean within FLAT_PCT of zero counts as flat (2026-10-06: +0.03% used to outvote a significant -0.38%). The
+    analogs vote only by how far their 21-day result beats or trails the name's usual 21 days in the same regime - the raw
+    number is positive for any name that rose over the years - and only with a baseline and at least 10 cases."""
     if not pack:
         return {'sign': 'none'}
     votes = []
     for t in triggers(pack, rules):
-        votes += [t['market_2006_2018_mean_pct'], t['market_2019_2026_mean_pct'], t['this_name_replay_mean_pct']]
-    analog = _mean(pack.get('analogs') or {}, 'forward_21d', 'mean_pct')
-    if analog is not None and _mean(pack.get('analogs') or {}, 'forward_21d', 'n') and pack['analogs']['forward_21d']['n'] >= 10:
-        votes.append(analog)
-    votes = [v for v in votes if v is not None]
-    up, down = sum(v > 0 for v in votes), sum(v < 0 for v in votes)
+        votes += [(t[k], FLAT_PCT) for k in ('market_2006_2018_mean_pct', 'market_2019_2026_mean_pct', 'this_name_replay_mean_pct')]
+    analogs = pack.get('analogs') or {}
+    analog, usual = _mean(analogs, 'forward_21d', 'mean_pct'), _mean(analogs, 'baseline_forward_21d', 'mean_pct')
+    if analog is not None and usual is not None and (_mean(analogs, 'forward_21d', 'n') or 0) >= 10:
+        votes.append((analog-usual, FLAT_ANALOG_PCT))
+    votes = [(v, band) for v, band in votes if v is not None]
+    up, down = sum(v >= band for v, band in votes), sum(v <= -band for v, band in votes)
     sign = 'none' if not votes else 'for' if up > down else 'against' if down > up else 'mixed'
-    return {'sign': sign, 'up': up, 'down': down, 'as_of': pack.get('as_of_bar')}
+    return {'sign': sign, 'up': up, 'down': down, 'flat': len(votes)-up-down, 'as_of': pack.get('as_of_bar')}
 
 
 def for_ai(pack, rules):
