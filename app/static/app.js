@@ -488,9 +488,35 @@ function ruleChart(b, live, currency) {
   return `<svg class="rb-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="최근 60거래일 종가와 신호선"><polyline class="rb-sma" points="${path(ch.sma20)}"/>${level(lines[0], 'rb-level')}${level(lines[1], 'rb-band')}<polyline class="rb-close" points="${path(ch.close)}"/>${dot}</svg>`
     + `<p class="rb-legend small muted"><span class="lg close">종가</span><span class="lg sma">20일선</span><span class="lg level">${b.side === 'BUY' ? '돌파선(20일 고가)' : '이탈선(20일 저가)'}</span><span class="lg band">${b.side === 'BUY' ? '평균회귀선(−2σ)' : '과열선(+2σ)'}</span><span class="lg now">현재가</span></p>`;
 }
+const chartRange = {}, historyCache = {}, historyAsked = {};
+function loadHistory(symbol) {
+  if (historyAsked[symbol] && Date.now() - historyAsked[symbol] < 30 * 60 * 1000) return;
+  historyAsked[symbol] = Date.now();
+  api('history/' + encodeURIComponent(symbol)).then(h => { historyCache[symbol] = h; if (state) renderRuleBoard(state); }).catch(() => {});
+}
+function longChart(points, live, currency) {
+  const W = 300, H = 92, P = 4, vals = points.map(p => p[1]).concat(finite(live) ? [live] : []);
+  const lo = Math.min(...vals), hi = Math.max(...vals), span = hi - lo || 1;
+  const x = i => P + i * (W - 2 * P) / Math.max(1, points.length - 1), y = v => H - P - (v - lo) / span * (H - 2 * P);
+  const line = points.map((p, i) => `${x(i).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' ');
+  const dot = finite(live) ? `<circle class="rb-now" cx="${W - P}" cy="${y(live).toFixed(1)}" r="3.5"/>` : '';
+  return `<svg class="rb-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="장기 종가 추이"><polyline class="rb-close" points="${line}"/>${dot}</svg>`
+    + `<p class="rb-legend small muted"><span class="lg close">${esc(points[0][0])} ~ ${esc(points[points.length - 1][0])} 종가(배당 반영)</span><span class="lg now">현재가</span></p>`;
+}
+function longSummary(lt) {
+  if (!lt) return '';
+  const p = x => finite(x) ? `${x > 0 ? '+' : ''}${x.toFixed(0)}%` : '—';
+  return `<p class="rb-long small">1년 <b>${p(lt.ret_1y_pct)}</b> · 5년 <b>${p(lt.ret_5y_pct)}</b> · 52주 범위 ${finite(lt.position_in_52w_pct) ? lt.position_in_52w_pct.toFixed(0) + '% 위치' : '—'} · 고점 대비 ${p(lt.from_all_time_high_pct)} · 최대 낙폭 ${p(lt.max_drawdown_pct)} <span class="muted">(${finite(lt.history_years) ? lt.history_years.toFixed(0) + '년 기록' : ''})</span></p>`;
+}
+document.addEventListener('click', e => {
+  const btn = e.target.closest('.rb-range button');
+  if (!btn) return;
+  chartRange[btn.dataset.symbol] = btn.dataset.range;
+  if (state) renderRuleBoard(state);
+});
 function renderRuleBoard(s) {
   const checks = ((s.desk_gate || {}).checked || []).filter(c => c.board);
-  $('rule-board').hidden = !checks.length;
+  $('rule-board').closest('.carousel').hidden = !checks.length;
   if (!checks.length) return;
   setHtml('rule-board', checks.map(c => {
     const b = c.board, q = (s.quotes || {})[c.symbol] || {}, inst = (s.instruments || []).find(i => i.symbol === c.symbol) || {};
@@ -512,8 +538,13 @@ function renderRuleBoard(s) {
     }).join('');
     const met = b.rules.filter(r => !r.ignored && r.fired).length;
     const head = met ? `<span class="pill rb-pill met">${b.side === 'BUY' ? '매수' : '매도'} 신호 ${met}개</span>` : `<span class="pill rb-pill">${b.side === 'BUY' ? '매수 신호 대기' : '보유 중 · 매도 신호 대기'}</span>`;
-    return `<article class="rb-card"><div class="rb-head"><div><strong>${esc(c.name)}</strong><span class="muted small"> ${esc(c.symbol)}</span></div>${head}</div><p class="rb-price"><b>${number(live, currency)}</b><span class="muted small"> 현재가 · 어제 종가 ${number(b.last_close, currency)}</span></p>${ruleChart(b, live, currency)}<ul class="rb-rules">${rows}</ul></article>`;
-  }).join('') + '<p class="rb-note small muted">트리거 가격은 "오늘 종가가 이 가격이면 규칙이 켜진다"는 뜻입니다(완료된 일봉 기준, 20분마다 계산). 실제 신호는 장 마감 뒤 완료된 일봉으로 판단합니다.</p>');
+    loadHistory(c.symbol);
+    const h = historyCache[c.symbol], range = chartRange[c.symbol] || '3m', ser = h && h.series;
+    const pts = !ser ? null : range === '1y' ? ser.weekly.slice(-53) : range === '5y' ? ser.weekly : range === 'all' ? ser.monthly : null;
+    const chart = range === '3m' ? ruleChart(b, live, currency) : pts && pts.length > 1 ? longChart(pts, live, currency) : '<p class="small muted rb-wait">장기 기록을 불러오는 중이거나 없습니다.</p>';
+    const seg = `<div class="seg rb-range" role="group" aria-label="그래프 기간">${[['3m','3개월'],['1y','1년'],['5y','5년'],['all','전체']].map(([k, t]) => `<button type="button" data-symbol="${esc(c.symbol)}" data-range="${k}" aria-pressed="${range === k}">${t}</button>`).join('')}</div>`;
+    return `<article class="rb-card car-slide"><div class="rb-head"><div><strong>${esc(c.name)}</strong><span class="muted small"> ${esc(c.symbol)}</span></div>${head}</div><p class="rb-price"><b>${number(live, currency)}</b><span class="muted small"> 현재가 · 어제 종가 ${number(b.last_close, currency)}</span></p>${longSummary(h && h.long_term)}${seg}${chart}<ul class="rb-rules">${rows}</ul></article>`;
+  }).join(''));
 }
 function ruleState(r, live) {
   if (r.ignored) return {state: 'off', dist: null, text: r.side === 'SELL' ? '참고용' : '연구로 제외'};
@@ -760,9 +791,9 @@ function renderTeam(s) {
   if (run?.sizing) setHtml('sizing-summary', `<div class="sizing-head"><h3>수량 산정</h3><span>최종 제안 <b>${quantity(run.sizing.quantity)}</b></span></div>${sizingDetails(run.sizing,s.instruments.find(i => i.symbol === run.symbol)?.currency)}<p class="muted small">목표·위험·매수 가능 수량 안에서 정수 주식으로 계산합니다. 손절 기준은 체결 가격을 보장하지 않습니다.</p>`);
   const runOld = !!run && s.server_time-run.time > 600, nextKey = JSON.stringify(run)+'|'+(runOld ? 'old' : 'new');
   if (reportKey !== nextKey) {
-    const opened = new Set([...$('reports').querySelectorAll('details[open]')].map(d => d.dataset.role));
     reportKey = nextKey;
-    $('reports').innerHTML = (run?.reports || []).map(r => `<details data-role="${esc(r.role)}" ${opened.has(r.role) || r.role === 'director' || r.role === 'planner' || r.role === 'selector' ? 'open' : ''}><summary>${esc(r.name || names[r.role])}${r.reused ? ' · 재사용 ' + r.age_minutes + '분 전' : ''} · ${r.role === 'selector' ? '선정 · ' + esc(r.symbol) : r.role === 'planner' ? '조사 브리핑' : esc(({BUY:'매수 의견',SELL:'매도 의견',HOLD:'관망 의견'})[r.stance] || '분석 보고서')}</summary><div class="report-body"><p>${esc(r.summary)}</p>${reportExtras(r)}<ul>${(r.risks || []).map(x => `<li>${esc(x)}</li>`).join('')}</ul>${(r.sources || []).filter(x => safeUrl(x.url)).map(x => `<a href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener noreferrer">${esc(x.title || x.url)} ↗</a>`).join('')}${searchEntryFrame(run,r)}<div class="report-model">${esc(r.engine)} · ${clock(r.time)}${r.usage?.total_tokens ? ' · ' + Number(r.usage.total_tokens).toLocaleString() + ' tokens' : ''}</div></div></details>`).join('') + (run?.error ? `<div class="notice error"><b>${runOld ? '지난 분석 실행의 오류 기록' : '이번 분석 오류'} · ${dateTime(run.time)}</b><br>${esc(run.error)}</div>` : '') + (run?.blocked ? `<div class="notice">${esc(run.blocked)}</div>` : '') + (run?.watch?.note ? `<div class="notice">${run.watch.status === 'waiting' ? '조건 진입 등록 · ' : '조건 진입 계획을 저장하지 않았습니다 · '}${esc(run.watch.note)}</div>` : '');
+    $('reports').innerHTML = (run?.reports || []).map(r => `<article class="car-slide report-card" data-role="${esc(r.role)}"><h4 class="report-title">${esc(r.name || names[r.role])}${r.reused ? ' · 재사용 ' + r.age_minutes + '분 전' : ''} · ${r.role === 'selector' ? '선정 · ' + esc(r.symbol) : r.role === 'planner' ? '조사 브리핑' : esc(({BUY:'매수 의견',SELL:'매도 의견',HOLD:'관망 의견'})[r.stance] || '분석 보고서')}</h4><div class="report-body"><p>${esc(r.summary)}</p>${reportExtras(r)}<ul>${(r.risks || []).map(x => `<li>${esc(x)}</li>`).join('')}</ul>${(r.sources || []).filter(x => safeUrl(x.url)).map(x => `<a href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener noreferrer">${esc(x.title || x.url)} ↗</a>`).join('')}${searchEntryFrame(run,r)}<div class="report-model">${esc(r.engine)} · ${clock(r.time)}${r.usage?.total_tokens ? ' · ' + Number(r.usage.total_tokens).toLocaleString() + ' tokens' : ''}</div></div></article>`).join('');
+    $('report-notes').innerHTML = (run?.error ? `<div class="notice error"><b>${runOld ? '지난 분석 실행의 오류 기록' : '이번 분석 오류'} · ${dateTime(run.time)}</b><br>${esc(run.error)}</div>` : '') + (run?.blocked ? `<div class="notice">${esc(run.blocked)}</div>` : '') + (run?.watch?.note ? `<div class="notice">${run.watch.status === 'waiting' ? '조건 진입 등록 · ' : '조건 진입 계획을 저장하지 않았습니다 · '}${esc(run.watch.note)}</div>` : '');
   }
 }
 function drawChart() {
@@ -804,5 +835,57 @@ function drawSpark(id, c) {
     + `<path class="sp-area" fill="url(#${id}-fill)" d="${line} L${w},${h} L0,${h} Z"/><path class="sp-line" stroke="url(#${id}-line)" d="${line}"/>`);
 }
 new ResizeObserver(() => drawChart()).observe($('equity-chart'));
+// ---- carousels: peek of the next card, scroll snap, an eased glide on the buttons, dots that stretch for the current card
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+function setupCarousel(root) {
+  const track = root.querySelector('.car-track'), dots = root.querySelector('.car-dots');
+  const prev = root.querySelector('.car-prev'), next = root.querySelector('.car-next'), foot = root.querySelector('.car-foot');
+  const slides = () => [...track.children].filter(el => el.classList.contains('car-slide'));
+  const offset = el => el.getBoundingClientRect().left - track.getBoundingClientRect().left + track.scrollLeft;
+  const current = () => {
+    const list = slides(), at = track.scrollLeft;
+    let best = 0, gap = Infinity;
+    list.forEach((el, i) => { const d = Math.abs(offset(el) - at); if (d < gap) { gap = d; best = i; } });
+    return best;
+  };
+  let anim = 0;
+  const go = i => {
+    const list = slides();
+    if (!list.length) return;
+    i = Math.max(0, Math.min(list.length - 1, i));
+    const from = track.scrollLeft, to = Math.min(offset(list[i]), track.scrollWidth - track.clientWidth);
+    cancelAnimationFrame(anim);
+    if (reduceMotion.matches || Math.abs(to - from) < 2) { track.scrollLeft = to; return; }
+    const start = performance.now(), dur = 520, ease = x => 1 - Math.pow(1 - x, 3);     // fast start, soft landing
+    track.style.setProperty('scroll-snap-type', 'none');
+    const step = now => {
+      const k = Math.min(1, (now - start) / dur);
+      track.scrollLeft = from + (to - from) * ease(k);
+      if (k < 1) anim = requestAnimationFrame(step); else track.style.removeProperty('scroll-snap-type');
+    };
+    anim = requestAnimationFrame(step);
+  };
+  const paint = () => {
+    const list = slides(), i = current();
+    foot.hidden = list.length <= 1;
+    if (dots.children.length !== list.length) {
+      dots.innerHTML = list.map((_, k) => `<button type="button" class="car-dot" role="tab" aria-label="${k + 1}번째 카드"></button>`).join('');
+    }
+    [...dots.children].forEach((d, k) => { d.classList.toggle('active', k === i); d.setAttribute('aria-selected', k === i); });
+    prev.disabled = i <= 0;
+    next.disabled = i >= list.length - 1 || track.scrollLeft + track.clientWidth >= track.scrollWidth - 2;
+  };
+  let queued = false;
+  track.addEventListener('scroll', () => { if (!queued) { queued = true; requestAnimationFrame(() => { queued = false; paint(); }); } }, {passive: true});
+  prev.addEventListener('click', () => go(current() - 1));
+  next.addEventListener('click', () => go(current() + 1));
+  dots.addEventListener('click', e => { const b = e.target.closest('.car-dot'); if (b) go([...dots.children].indexOf(b)); });
+  track.addEventListener('keydown', e => { if (e.key === 'ArrowRight') { go(current() + 1); e.preventDefault(); } if (e.key === 'ArrowLeft') { go(current() - 1); e.preventDefault(); } });
+  track.tabIndex = 0;
+  new MutationObserver(paint).observe(track, {childList: true});
+  new ResizeObserver(paint).observe(track);
+  paint();
+}
+document.querySelectorAll('[data-carousel]').forEach(setupCarousel);
 reload();
 setInterval(() => { if (loggedIn) reload(); },2000);

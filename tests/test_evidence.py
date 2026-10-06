@@ -176,3 +176,23 @@ def test_a_long_answer_is_shortened_not_rejected_and_a_bad_one_names_its_role_an
         Agents(config, store).run('technical', ctx, 1)
     assert 'technical' in str(err.value) and 'stop_loss_pct' in str(err.value)
     store.release()
+
+
+def test_the_long_history_reaches_the_dashboard_but_its_chart_series_never_reach_the_ai(tmp_path):
+    p = dict(pack(), long_term={'ret_1y_pct': 12.0, 'ret_5y_pct': 80.0, 'position_in_52w_pct': 70, 'from_all_time_high_pct': -8.0,
+                                'max_drawdown_pct': -55.0, 'history_years': 26},
+             series={'weekly': [['2026-09-25', 100.0], ['2026-10-02', 101.0]], 'monthly': [['2001-01-31', 10.0], ['2026-09-30', 100.0]]})
+    write(tmp_path, p)
+    ai = evidence.for_ai(EvidenceStore(tmp_path).get('005930'), ['momentum'])
+    assert 'series' not in ai and ai['long_term']['ret_5y_pct'] == 80.0
+    assert evidence.brief(p, ['momentum'])['long_term']['position_in_52w_pct'] == 70
+    assert 'long_term(상장 이후 전체 기록' in agents.with_evidence('x', 'director', {'evidence': {'available': True}})
+    config = Config(database_url='sqlite:///'+str(tmp_path/'h.db'), mode='demo', password=PASSWORD, session_secret=SECRET,
+                    toss_id='', toss_secret='', gemini_key='', evidence_dir=str(tmp_path))
+    with TestClient(create_app(config, background=False, test=True)) as client:
+        assert client.get('/api/history/005930').status_code == 401                        # behind the login like every API
+        client.post('/api/login', json={'password': PASSWORD}, headers=ACTION)
+        body = client.get('/api/history/005930').json()
+        assert len(body['series']['monthly']) == 2 and body['long_term']['ret_1y_pct'] == 12.0
+        assert client.get('/api/history/ZZZZ').json()['series'] is None
+        assert client.get('/api/history/..%2Fetc').status_code in (200, 404) and client.get('/api/history/..%2Fetc').json().get('series') is None

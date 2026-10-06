@@ -281,6 +281,14 @@ def create_app(config=None, background=True, test=False):
     def state():
         return engine.public_state()
 
+    @app.get('/api/history/{symbol}')
+    def history_chart(symbol: str):
+        """A name's long history for the dashboard's charts (weekly 5 years, monthly all), from the archive's evidence pack."""
+        pack = engine.evidence.get(symbol) if symbol.isalnum() and len(symbol) <= 12 else None
+        if not pack:
+            return {'symbol': symbol, 'series': None, 'long_term': None}
+        return {'symbol': symbol, 'series': pack.get('series'), 'long_term': pack.get('long_term'), 'as_of': pack.get('as_of_bar')}
+
     @app.post('/api/start')
     def start():
         if c.mode == 'toss':

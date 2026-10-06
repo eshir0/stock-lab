@@ -94,6 +94,37 @@ def group_rates(research, market, etf):
     return out
 
 
+def long_term(df):
+    """The name's whole history in a few numbers, on dividend-adjusted closes (total return), plus thinned series for the
+    dashboard's long charts (weekly for five years, monthly for everything). Only completed bars are used."""
+    df = df.dropna(subset=['close'])
+    df = df[df['close'] > 0].reset_index(drop=True)
+    f = (df['adjclose']/df['close']).to_numpy() if 'adjclose' in df and df['adjclose'].notna().all() else np.ones(len(df))
+    c = pd.Series(df['close'].to_numpy()*f, index=pd.to_datetime(df['date']))
+    last, n = c.iloc[-1], len(c)
+    ret = lambda days: r((last/c.iloc[-days-1]-1)*100) if n > days else None
+    year = c.iloc[-252:]
+    peak = c.cummax()
+    dd = c/peak-1
+    trough = dd.idxmin()
+    recovered = c[trough:][c[trough:] >= peak[trough]]
+    yearly = c.groupby(c.index.year).last().pct_change().dropna().tail(10)
+    summary = {'history_years': r(n/252, 1), 'first_bar': str(c.index[0].date()),
+               'ret_1y_pct': ret(252), 'ret_3y_pct': ret(756), 'ret_5y_pct': ret(1260), 'ret_10y_pct': ret(2520),
+               'high_52w': r(year.max(), 4), 'low_52w': r(year.min(), 4),
+               'position_in_52w_pct': r((last-year.min())/(year.max()-year.min())*100, 0) if year.max() > year.min() else None,
+               'from_all_time_high_pct': r((last/c.max()-1)*100),
+               'max_drawdown_pct': r(dd.min()*100), 'max_drawdown_bottom': str(trough.date()),
+               'max_drawdown_recovery_days': int((recovered.index[0]-trough).days) if len(recovered) else None,
+               'yearly_return_pct': {str(y): r(v*100) for y, v in yearly.items()},
+               'note': '배당 반영 종가 기준. 수익률·낙폭은 배당 재투자를 가정한 값'}
+    weekly = c.iloc[-1260:].resample('W-FRI').last().dropna()
+    monthly = c.resample('ME').last().dropna()
+    series = {'weekly': [[str(d.date()), r(v, 4)] for d, v in weekly.items()],
+              'monthly': [[str(d.date()), r(v, 4)] for d, v in monthly.items()]}
+    return summary, series
+
+
 def own(df, market, etf):
     """Own-history replay with the site's exit and costs, forward returns and analogs."""
     df = df.dropna(subset=['open', 'high', 'low', 'close'])
@@ -255,7 +286,12 @@ def main():
         except Exception as exc:
             print('skip', symbol, type(exc).__name__, exc, flush=True)
             continue
+        try:
+            long_summary, long_series = long_term(pd.read_parquet(path))
+        except Exception:
+            long_summary, long_series = None, None
         pack = {'symbol': symbol, 'name': item['name'], 'market': market, 'etf': etf, 'built_at': datetime.now().isoformat(timespec='seconds'),
+                'long_term': long_summary, 'series': long_series,
                 'as_of_bar': history['last_bar'],
                 'method': '과거 20년 데이터(2006~, 국내는 상장 폐지 종목 포함)로 서버가 계산한 사실. 규칙대로 샀을 때의 결과이며 AI 판단의 결과가 아님. '
                           '비용(수수료·세금·슬리피지)과 사이트의 청산 방식(추적 손절, 21거래일) 반영.',

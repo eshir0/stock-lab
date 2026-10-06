@@ -94,7 +94,7 @@ def summary(pack, rules):
 def for_ai(pack, rules):
     if not pack:
         return {'available': False, 'note': '오늘의 과거 근거 묶음이 없습니다(수집 중이거나 오래됨). 근거 묶음 없이 판단하세요.'}
-    body = {k: v for k, v in pack.items() if k not in ('built_at',)}
+    body = {k: v for k, v in pack.items() if k not in ('built_at', 'series')}     # chart series are for the dashboard only
     return {'available': True, 'triggered_rules': triggers(pack, rules), 'summary': summary(pack, rules), **body}
 
 
@@ -103,4 +103,6 @@ def brief(pack, rules):
     if not pack:
         return None
     return {'summary': summary(pack, rules), 'triggered_rules': triggers(pack, rules),
-            'analogs_21d': (pack.get('analogs') or {}).get('forward_21d'), 'now': pack.get('now')}
+            'analogs_21d': (pack.get('analogs') or {}).get('forward_21d'), 'now': pack.get('now'),
+            'long_term': {k: (pack.get('long_term') or {}).get(k) for k in ('ret_1y_pct', 'ret_5y_pct', 'position_in_52w_pct',
+                                                                     'from_all_time_high_pct', 'max_drawdown_pct')}}
