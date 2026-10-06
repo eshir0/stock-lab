@@ -148,7 +148,12 @@ class Store:
             new['quotes'] = copy.deepcopy(state['quotes'])
             new['generation'] = state['generation']+1
             new['revision'] = state['revision']+1
-            event(new, '이전 실험을 보관하고 새 가상 시드머니로 시작했습니다. 중지 상태입니다.')
+            # How fills are approved is the operator's standing choice, not part of a strategy: the new-experiment form has
+            # no field for it, so a reset to manual silently left every proposal waiting for a click (2026-10-06).
+            if state.get('execution_mode') in ('manual', 'auto'):
+                new['execution_mode'] = state['execution_mode']
+            event(new, '이전 실험을 보관하고 새 가상 시드머니로 시작했습니다. 중지 상태입니다. 실행 방식은 이전 실험대로 '
+                       +('자동 모의체결' if new['execution_mode'] == 'auto' else '사용자 승인')+'입니다.')
             state.clear()
             state.update(new)
             return copy.deepcopy(state)

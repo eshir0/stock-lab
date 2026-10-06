@@ -145,3 +145,15 @@ def test_the_stop_risk_of_an_etf_has_no_sale_tax_in_it():
         return sized['estimated_stop_risk']/sized['quantity']
     # selling at the stop (about 9,500 won after slippage) costs a stock 0.20% more in tax: about 19 won a share
     assert per_share('005930')-per_share('069500') == pytest.approx(19.0, rel=.03)
+
+
+def test_a_new_experiment_keeps_the_execution_mode(ledger):
+    """2026-10-06: an experiment made from the form (which has no field for it) fell back to manual approval, so the night's
+    proposals would have waited for a click. The standing choice carries over; it can still be changed while stopped."""
+    ledger.stop()
+    ledger.new_experiment(1_000_000, 1000, 'next', strategy_mode='intraday', strategy_settings=SETTINGS)
+    state = ledger.store.read()
+    assert state['execution_mode'] == 'auto' and '자동 모의체결' in state['events'][-1]['message']
+    ledger.set_execution('manual')
+    ledger.new_experiment(1_000_000, 1000, 'after', strategy_mode='intraday', strategy_settings=SETTINGS)
+    assert ledger.store.read()['execution_mode'] == 'manual'
