@@ -97,7 +97,7 @@ def judge(state, *, tracking, report, evaluation, config, now):
         f'기대값 {_pct(mean)} · 신뢰구간 {_pct(ci[0])} ~ {_pct(ci[1])}' if ci else '청산된 거래 2건부터 계산합니다')
     for cy in active:
         mine, index = (performance.get(cy) or {}).get('return_pct'), benchmark.get(cy)
-        add('benchmark_'+cy, f'{cy} 계좌 수익률 ≥ 같은 기간 {index["name"] if index else "지수 ETF"} 보유',
+        add('benchmark_'+cy, f'{cy} 계좌 수익률 ≥ 같은 기간 {index["name"] if index else "지수 ETF"} 보유(배당 포함)',
             None if index is None or mine is None else bool(mine >= index['return_pct']),
             f'이 실험 {_pct(mine)} · 지수 {_pct(index["return_pct"])}' if index else '지수 일봉을 아직 읽지 못했습니다')
     for cy in active:

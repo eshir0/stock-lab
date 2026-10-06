@@ -10,12 +10,18 @@ from zoneinfo import ZoneInfo
 
 REGULAR = {'KR': ('Asia/Seoul', time(9, 0), time(15, 20), '국내'),
            'US': ('America/New_York', time(9, 30), time(16, 0), '미국')}
+CLOSING = {'KR': time(15, 30), 'US': time(16, 0)}     # when the day's official closing price is set (after KR's auction)
 
 
 def regular_open(market, now):
     zone, start, end, _ = REGULAR[market]
     local = datetime.fromtimestamp(now, ZoneInfo(zone))
     return local.weekday() < 5 and start <= local.time() < end
+
+
+def closing_time(market, day):
+    """Unix time at which the official close of `day` (a date) is known in `market`."""
+    return datetime.combine(day, CLOSING[market], ZoneInfo(REGULAR[market][0])).timestamp()
 
 
 def window_kst(market, now):

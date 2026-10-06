@@ -392,7 +392,7 @@ class Engine(DeskMixin, FocusMixin):
 
     def refresh_benchmark(self, now=None):
         """Daily closes of the index ETFs the experiment is compared with (scorecard.BENCHMARKS), read at most every 15 minutes
-        outside the state lock. The starting close is fixed the first time and never moves."""
+        outside the state lock, with the ETF's dividends from its evidence pack (taxed like the account's own)."""
         now = time.time() if now is None else now
         if now-self.benchmark_at < 900:
             return
@@ -405,7 +405,7 @@ class Engine(DeskMixin, FocusMixin):
             if (state.get('initial') or {}).get(currency, 0) <= 0:
                 continue
             try:
-                rows[currency] = (symbol, self.daily_bars(symbol, now))
+                rows[currency] = (symbol, self.daily_bars(symbol, now), (self.evidence.get(symbol, now) or {}).get('dividends'))
             except (ProviderError, KeyError, ValueError):
                 continue
         if not rows:
@@ -414,8 +414,9 @@ class Engine(DeskMixin, FocusMixin):
             if s['experiment_id'] != state['experiment_id']:
                 return
             bench = s.setdefault('benchmark', {})
-            for currency, (symbol, bars) in rows.items():
-                found = scorecard.benchmark_entry(symbol, bars, s['started_at'], bench.get(currency))
+            for currency, (symbol, bars, dividends) in rows.items():
+                found = scorecard.benchmark_entry(symbol, bars, s['started_at'], bench.get(currency), dividends,
+                                                  float(self.WITHHOLDING[currency]))
                 if found:
                     bench[currency] = found
 

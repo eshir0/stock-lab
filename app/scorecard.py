@@ -9,9 +9,10 @@ Pure functions over plain dicts; nothing here trades or calls a service.
 """
 import math
 import time
+from datetime import datetime, timezone
 from decimal import Decimal
 
-from . import shares
+from . import hours, shares
 from .instruments import SYMBOLS
 
 BENCHMARKS = {'KRW': '069500', 'USD': 'SPY'}     # KODEX 200 and SPDR S&P 500: what simply holding the market earned
@@ -162,14 +163,24 @@ def report(trades, dividends=()):
             'recent': closed[-RECENT:][::-1]}
 
 
-def benchmark_entry(symbol, bars, started_at, previous=None):
-    """An index ETF bought at the last completed close at or before the experiment's start and simply held: its return and
-    worst drawdown to the latest completed close. Once set, the starting close never moves. None until bars exist.
+def _price_entry(symbol, bars, started_at, previous=None):
+    """An index ETF bought at the last close that was already set when the experiment started, and simply held: its return
+    and worst drawdown to the latest completed close. None until bars exist. Once set, the starting close only moves in one
+    case: the provider marks a daily bar complete a day after its date, so an experiment started after the close but
+    before midnight first sees the previous session; when the start day's own bar arrives it becomes the start.
 
     The fetch only covers the last few months, so the highest close and the worst drawdown are carried in the entry and
     only bars newer than the last one processed are added: an empty answer, or a window that no longer reaches back to an
     early peak, never erases what was already seen."""
     bars = sorted((b for b in bars or [] if isinstance(b.get('close'), (int, float)) and b['close'] > 0), key=lambda b: b['time'])
+    market = SYMBOLS[symbol]['market']
+
+    def before_start(bar):           # its closing price was already set when the experiment started
+        day = datetime.fromtimestamp(bar['time']+43200, timezone.utc).date()
+        return bar['time'] <= started_at and hours.closing_time(market, day) <= started_at
+    if previous and any(before_start(b) and b['time'] > previous.get('start_time', 0) for b in bars):
+        previous = None              # a daily bar is marked complete only a day later: a session that had already closed
+                                     # when the experiment started arrived after the start was fixed, so it becomes the start
     if previous and previous.get('symbol') == symbol and previous.get('start_close'):
         start_time, start = previous['start_time'], previous['start_close']
         seen = previous.get('last_time', start_time)
@@ -185,7 +196,7 @@ def benchmark_entry(symbol, bars, started_at, previous=None):
             return dict(previous, peak=peak)
         last_time, last_close = previous.get('last_time', start_time), previous.get('last_close', start)
     else:
-        before = [b for b in bars if b['time'] <= started_at]
+        before = [b for b in bars if before_start(b)]
         if not before:
             return previous
         start_time, start = before[-1]['time'], before[-1]['close']
@@ -199,3 +210,29 @@ def benchmark_entry(symbol, bars, started_at, previous=None):
     return {'symbol': symbol, 'name': SYMBOLS[symbol]['name'], 'start_time': start_time, 'start_close': start,
             'last_time': last_time, 'last_close': last_close, 'return_pct': round((last_close/start-1)*100, 3),
             'max_drawdown_pct': round(worst, 3), 'peak': peak}
+
+
+def _bar_day(timestamp):
+    return datetime.fromtimestamp(timestamp+43200, timezone.utc).date().isoformat()
+
+
+def benchmark_entry(symbol, bars, started_at, previous=None, dividends=None, withholding=0.0):
+    """`_price_entry` plus the index ETF's own dividends, like the experiment's positions get theirs (engine.credit_dividends):
+    every ex-date after the starting session and up to the latest close adds the cash per share after `withholding`, and
+    `return_pct` is the total return. Without that the index would be measured on price alone while the account it is
+    compared with collects dividends. Paid dividends are carried in the entry, so a pack that is stale for a day removes
+    nothing. The drawdown stays on price (the dividend arrives as cash, it does not lift the closes)."""
+    entry = _price_entry(symbol, bars, started_at, previous)
+    if not entry:
+        return entry
+    first, last = _bar_day(entry['start_time']), _bar_day(entry['last_time'])
+    paid = {ex: net for ex, net in ((previous or {}).get('dividends') or {}).items()
+            if (previous or {}).get('start_time') == entry['start_time']}
+    for d in dividends or []:
+        ex, amount = d.get('ex_date'), d.get('amount')
+        if isinstance(ex, str) and isinstance(amount, (int, float)) and amount > 0:
+            paid.setdefault(ex, round(amount*(1-withholding), 6))
+    paid = {ex: net for ex, net in sorted(paid.items()) if first < ex <= last}
+    per_share = sum(paid.values())
+    return dict(entry, dividends=paid, dividend_per_share=round(per_share, 6), price_return_pct=entry['return_pct'],
+                return_pct=round((entry['last_close']+per_share)/entry['start_close']*100-100, 3))

@@ -85,7 +85,7 @@ def test_the_benchmark_is_an_index_etf_bought_at_the_start_and_held():
     entry = benchmark_entry('069500', rows, NOW-8*DAY+60)
     assert entry['start_close'] == 102 and entry['last_close'] == 105 and entry['return_pct'] == pytest.approx(2.941, abs=1e-3)
     assert entry['max_drawdown_pct'] == pytest.approx((110-99)/110*100, abs=1e-3) and entry['name'] == 'KODEX 200'
-    later = benchmark_entry('069500', rows+daily([120], first=NOW-4*DAY), NOW, entry)        # the starting close never moves
+    later = benchmark_entry('069500', rows+daily([120], first=NOW-4*DAY), NOW-8*DAY+60, entry)  # the starting close never moves
     assert later['start_close'] == 102 and later['return_pct'] == pytest.approx(120/102*100-100, abs=1e-3)
     assert benchmark_entry('069500', rows, NOW-20*DAY) is None                                 # nothing before the start yet
     assert benchmark_entry('SPY', [], NOW, None) is None and benchmark_entry('SPY', [], NOW, entry) == entry
@@ -301,21 +301,57 @@ from app.scorecard import benchmark_entry as _bench
 
 
 def _bars(points):
-    return [{'time': t, 'close': c} for t, c in points]
+    return [{'time': t*DAY, 'close': c} for t, c in points]   # day t, stamped at its midnight like the provider does
 
 
 def test_an_empty_answer_or_a_shorter_window_keeps_the_index_statistics():
-    full = _bench('SPY', _bars([(0, 100), (1, 150), (2, 100), (3, 125)]), 0)
+    full = _bench('SPY', _bars([(0, 100), (1, 150), (2, 100), (3, 125)]), DAY-1)
     assert (full['return_pct'], full['max_drawdown_pct']) == (25.0, 33.333)
-    assert {k: _bench('SPY', [], 0, full)[k] for k in ('return_pct', 'max_drawdown_pct')} == {'return_pct': 25.0, 'max_drawdown_pct': 33.333}
-    later = _bench('SPY', _bars([(3, 125), (4, 140)]), 0, full)                     # the early peak is out of the window
+    assert {k: _bench('SPY', [], DAY-1, full)[k] for k in ('return_pct', 'max_drawdown_pct')} == {'return_pct': 25.0, 'max_drawdown_pct': 33.333}
+    later = _bench('SPY', _bars([(3, 125), (4, 140)]), DAY-1, full)                     # the early peak is out of the window
     assert later['max_drawdown_pct'] == 33.333 and later['return_pct'] == 40.0 and later['peak'] == 150
-    deeper = _bench('SPY', _bars([(4, 140), (5, 90)]), 0, later)
+    deeper = _bench('SPY', _bars([(4, 140), (5, 90)]), DAY-1, later)
     assert deeper['max_drawdown_pct'] == 40.0                                         # from the remembered 150
 
 
 def test_an_entry_saved_before_the_peak_was_kept_is_upgraded():
-    old = {'symbol': 'SPY', 'start_time': 0, 'start_close': 100, 'last_time': 3, 'last_close': 125, 'return_pct': 25.0,
+    old = {'symbol': 'SPY', 'start_time': 0, 'start_close': 100, 'last_time': 3*DAY, 'last_close': 125, 'return_pct': 25.0,
            'max_drawdown_pct': 33.333}
-    up = _bench('SPY', _bars([(1, 150), (2, 100), (3, 125), (4, 160)]), 0, old)
+    up = _bench('SPY', _bars([(1, 150), (2, 100), (3, 125), (4, 160)]), DAY-1, old)
     assert up['peak'] == 160 and up['max_drawdown_pct'] == 33.333 and up['return_pct'] == 60.0
+
+
+def test_a_start_day_bar_that_arrives_late_becomes_the_start():
+    """2026-10-06: the experiment started at 16:05 Seoul, after the 15:30 close, but the day's bar is marked complete only at
+    midnight, so the index was first fixed at the previous session's close (10-02) and would have counted 10-06 twice."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    seoul = ZoneInfo('Asia/Seoul')
+    midnight = lambda d: datetime(2026, 10, d, tzinfo=seoul).timestamp()
+    started = datetime(2026, 10, 6, 16, 5, tzinfo=seoul).timestamp()
+    first = benchmark_entry('069500', [{'time': midnight(1), 'close': 100}, {'time': midnight(2), 'close': 101}], started)
+    assert first['start_close'] == 101
+    rows = [{'time': midnight(2), 'close': 101}, {'time': midnight(6), 'close': 104}, {'time': midnight(7), 'close': 106}]
+    later = benchmark_entry('069500', rows, started, first)
+    assert later['start_close'] == 104 and later['start_time'] == midnight(6) and later['return_pct'] == pytest.approx(106/104*100-100, abs=1e-3)
+    assert benchmark_entry('069500', rows, started, later)['start_close'] == 104                # and then it stays
+    early = datetime(2026, 10, 6, 11, 0, tzinfo=seoul).timestamp()                             # mid-session start
+    assert benchmark_entry('069500', rows, early, first)['start_close'] == 101
+
+
+def test_the_index_collects_its_dividends_like_the_account_does():
+    """The account is paid its dividends after withholding, so the index it is compared with is too (2026-10-06)."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    ny = ZoneInfo('America/New_York')
+    day = lambda m, d: datetime(2026, m, d, tzinfo=ny).timestamp()
+    started = datetime(2026, 10, 6, 3, 5, tzinfo=ny).timestamp()
+    divs = [{'ex_date': '2026-09-18', 'amount': 1.9}, {'ex_date': '2026-12-18', 'amount': 2.0}, {'ex_date': '2026-10-02', 'amount': 'x'}]
+    first = benchmark_entry('SPY', [{'time': day(10, 5), 'close': 100.0}], started, None, divs, 0.15)
+    assert first['dividend_per_share'] == 0 and first['return_pct'] == 0             # September's was before the start
+    rows = [{'time': day(10, 5), 'close': 100.0}, {'time': day(12, 18), 'close': 99.0}]
+    later = benchmark_entry('SPY', rows, started, first, divs, 0.15)
+    assert later['dividends'] == {'2026-12-18': 1.7} and later['price_return_pct'] == -1.0
+    assert later['return_pct'] == pytest.approx(0.7, abs=1e-3) and later['max_drawdown_pct'] == 1.0
+    kept = benchmark_entry('SPY', rows+[{'time': day(12, 21), 'close': 99.5}], started, later, None, 0.15)   # a stale pack
+    assert kept['dividends'] == {'2026-12-18': 1.7} and kept['return_pct'] == pytest.approx(1.2, abs=1e-3)
