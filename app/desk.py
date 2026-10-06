@@ -283,7 +283,8 @@ class DeskMixin:
 
     def desk_buy_allowed(self, state, symbol):
         if not self.focus_allows(state, symbol):
-            raise ProviderError('오늘의 집중 종목이 아니어서 신규 매수하지 않습니다. 보유 중이면 추가 매수 없이 청산 규칙으로 관리합니다.')
+            raise ProviderError(('규칙 신호가 꺼져 지금은 매수 대상이 아니어서' if self.scans_pool(state) else '오늘의 집중 종목이 아니어서')
+                                +' 신규 매수하지 않습니다. 보유 중이면 추가 매수 없이 청산 규칙으로 관리합니다.')
         currency = SYMBOLS[symbol]['currency']
         for held in state['positions']:
             if SYMBOLS[held]['currency'] == currency:
@@ -587,8 +588,9 @@ class DeskMixin:
             return False
         if not self.focus_allows(s, symbol):
             # Checked before the quote: a name that left the list is no longer quoted, and would otherwise wait unseen.
-            entry.close(watch, 'cancelled', '오늘의 집중 종목에서 빠져 취소했습니다.', now)
-            event(s, f'{name} 조건 진입을 취소했습니다. 오늘의 집중 종목이 아닙니다.')
+            why = '매수 대상 목록' if self.scans_pool(s) else '오늘의 집중 종목'
+            entry.close(watch, 'cancelled', f'{why}에서 빠져 취소했습니다.', now)
+            event(s, f'{name} 조건 진입을 취소했습니다. {why}에서 빠졌습니다.')
             return False
         quote = s['quotes'].get(symbol)
         try:
