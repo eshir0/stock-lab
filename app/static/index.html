@@ -44,7 +44,7 @@
 <header class="topbar">
   <a href="/" class="brand"><span class="brandmark smallmark">S<span>/</span>L</span><span class="brand-name">Stock Lab</span></a>
   <nav class="topnav" aria-label="섹션 이동">
-    <a href="#sec-control"><svg class="ic"><use href="#i-dashboard"/></svg><span>컨트롤룸</span></a>
+    <a href="#sec-control"><svg class="ic"><use href="#i-dashboard"/></svg><span>연구실</span></a>
     <a href="#sec-signals"><svg class="ic"><use href="#i-target"/></svg><span>신호 현황</span></a>
     <a href="#sec-hold"><svg class="ic"><use href="#i-wallet"/></svg><span>보유·결정</span></a>
     <a href="#sec-agents"><svg class="ic"><use href="#i-users"/></svg><span>에이전트</span></a>
@@ -59,7 +59,7 @@
 <section class="hero" id="sec-control">
   <div class="hero-copy">
     <p class="eyebrow chip"><i class="dot"></i>RESEARCH WORKSPACE</p>
-    <h1>투자팀 <span class="grad-text">컨트롤룸</span></h1>
+    <h1>모의투자 <span class="grad-text">연구실</span></h1>
     <p id="mode-description" class="lead muted">연결 상태 확인 중</p>
     <div class="command-actions"><span id="run-status" class="status">중지됨</span><button id="start" class="primary">▶ 시작</button><button id="stop" class="secondary">■ 중지</button><button id="liquidate" class="danger">전량 매도 후 종료</button></div>
     <ul class="hero-facts">
@@ -80,7 +80,7 @@
 <div class="work-grid" id="sec-hold"><section class="panel positions-panel"><div class="section-title"><div><p class="eyebrow">POSITIONS</p><h2>보유 종목과 청산 계획</h2></div><span class="pill">가상 계좌</span></div><div class="table-wrap"><table><thead><tr><th>종목</th><th>수량</th><th>평균 매입가</th><th>평가손익</th><th>손절 기준</th><th>익절 기준</th><th>보유 기한</th></tr></thead><tbody id="positions"></tbody></table></div><p class="small muted position-note">손절·익절은 실행 중에만 감시합니다. 가격 급변·거래 시간·호가 부족으로 기준 가격이나 기한에 청산되지 않을 수 있습니다.</p></section>
 <section class="panel approvals"><div class="section-title"><div><p class="eyebrow">DECISIONS</p><h2 id="decision-title">나의 결정</h2></div><span id="pending-count" class="count">0</span></div><div id="proposal-list"></div></section></div>
 <section class="panel team-panel" id="sec-agents"><div class="section-title"><div><p class="eyebrow">AGENT DESK</p><h2>에이전트 데스크</h2><p class="muted small" id="team-context">실행하면 역할별 분석이 이곳에 쌓입니다.</p></div><div class="inline-controls"><select id="analyze-symbol" aria-label="분석 종목"></select><button id="analyze" class="secondary">지금 분석</button></div></div><p id="research-flow" class="research-flow small muted"></p><p id="intel-status" class="intel-status small muted"></p><p id="gate-status" class="gate-status small muted" hidden></p><div id="team" class="team"></div><div id="sizing-summary" class="sizing-summary" hidden></div><div id="reports" class="reports"></div></section>
-<div class="market-stack" id="sec-market"><section class="panel market-panel"><div class="section-title"><div><p class="eyebrow">WATCHLIST</p><h2>관심종목</h2></div><span id="poll-label" class="pill">10초 조회</span></div><div id="watchlist"></div><div class="chart-heading"><div><strong id="chart-title">원화 평가자산</strong><span class="muted small"> · 이번 기록 구간</span></div><select id="chart-currency" aria-label="차트 통화"><option value="KRW">KRW</option><option value="USD">USD</option></select></div><svg id="equity-chart" viewBox="0 0 600 180" role="img" aria-label="가상 계좌 평가자산 추이"></svg><p id="chart-note" class="muted small"></p></section>
+<div class="market-stack" id="sec-market"><section class="panel market-panel"><div class="section-title"><div><p class="eyebrow">LIVE QUOTES</p><h2>실시간 감시 중</h2><p class="muted small">10초마다 시세를 받는 종목: 신호가 켜진 종목, 보유 종목, 지수 ETF</p></div><span id="poll-label" class="pill">10초 조회</span></div><div id="watchlist"></div><div class="chart-heading"><div><strong id="chart-title">원화 평가자산</strong><span class="muted small"> · 이번 기록 구간</span></div><select id="chart-currency" aria-label="차트 통화"><option value="KRW">KRW</option><option value="USD">USD</option></select></div><svg id="equity-chart" viewBox="0 0 600 180" role="img" aria-label="가상 계좌 평가자산 추이"></svg><p id="chart-note" class="muted small"></p></section>
 <section class="panel focus-panel" id="sec-focus" aria-label="오늘의 집중 종목">
 <div class="section-title"><div><p class="eyebrow">DAILY FOCUS</p><h2>오늘의 집중 종목</h2><p id="focus-intro" class="muted small">개장 90분 전에 후보 종목을 일봉 데이터로 먼저 거르고(하락 추세·이미 급등한 종목·거래대금 부족은 제외), AI가 뉴스와 테마를 확인해 시장별로 고릅니다. AI는 걸러진 후보 안에서만 고를 수 있고 출처가 없으면 반영하지 않습니다. 오늘 목록 밖의 종목은 신규 매수하지 않으며, 과거 성과 기준이라 수익을 보장하지 않습니다.</p></div><span id="focus-mode" class="pill">일일 집중</span></div>
 <div class="focus-grid"><article id="focus-kr" class="focus-col" aria-label="국내 집중 종목"></article><article id="focus-us" class="focus-col" aria-label="미국 집중 종목"></article></div>

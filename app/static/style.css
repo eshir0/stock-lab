@@ -663,3 +663,7 @@ dialog .eyebrow{margin:0 0 8px}
 .pb-state.near{background:var(--warn-bg);color:var(--warn);font-weight:600}
 .pb-state.held{background:var(--row-hover);color:var(--accent)}
 .pb-note{margin:8px 0 0}
+
+.why-tag{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:999px;font-size:.72rem;vertical-align:middle;background:var(--track);color:var(--muted)}
+.why-tag.signal{background:var(--gain-bg);color:var(--gain)}
+.why-tag.held{background:var(--row-hover);color:var(--accent)}

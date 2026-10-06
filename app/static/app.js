@@ -326,7 +326,7 @@ function render() {
   const ratio = finite(s.max_order_ratio) ? Math.round(s.max_order_ratio * 100) : 10;
   $('execution-description').textContent = (auto ? '자동 모의매매 · 개별 승인 없이 조건 충족 시 체결' : '직접 승인 · 매매 제안을 검토한 뒤 체결') + ` · 1회 매수 ${ratio}% / 종목당 30% 한도`;
   renderStrategy(s);
-  $('scheduler-status').textContent = s.scheduler_status || (s.running ? '관심종목을 순서대로 분석합니다.' : '운용 방식과 가상 원금을 확인한 뒤 시작하세요. 설정은 중지 상태에서 변경할 수 있습니다.');
+  $('scheduler-status').textContent = s.scheduler_status || (s.running ? '신호가 켜진 종목을 분석합니다.' : '운용 방식과 가상 원금을 확인한 뒤 시작하세요. 설정은 중지 상태에서 변경할 수 있습니다.');
   renderPerformance(s,'KRW','kr');
   renderPerformance(s,'USD','us');
   const date = stamp(now)?.toISOString().slice(0,10);
@@ -348,10 +348,13 @@ function render() {
   $('trade-count').textContent = `${s.trades_count}건 모의체결`;
   $('next-run').textContent = s.running ? `분석 간격 ${intervalText(s)}` + (s.pacing?.paced ? ` · 사용량에 맞춰 지금은 ${minutes(Math.round(s.pacing.interval / 60) * 60)}` : '') : '현재 중지 상태';
   $('poll-label').textContent = `${s.config.poll}초 조회`;
+  const flagged = new Set([...((s.signal_names || {}).KR || []), ...((s.signal_names || {}).US || [])]);
+  const why = sym => s.positions[sym] ? ['held', '보유 중'] : flagged.has(sym) ? ['signal', '신호 켜짐'] : ['index', '지수 기준'];
   setHtml('watchlist', s.instruments.map(i => {
+    const [whyCls, whyText] = s.strategy_settings?.scan === 'pool' ? why(i.symbol) : ['', ''];
     const q = s.quotes[i.symbol], stale = !q || !finite(q.asof) || now - q.asof > 30 || q.asof - now > 5;
     const leverage = finite(i.leverage_factor) && Math.abs(i.leverage_factor) > 1 ? `<span class="etf-tag">ETF ${i.leverage_factor > 0 ? '+' : ''}${i.leverage_factor}배</span>` : '';
-    return `<div class="watchrow"><span class="avatar ${avatarClass(i.symbol)}" aria-hidden="true">${esc([...String(i.name)][0] || '?')}</span><div><span class="name">${esc(i.name)}</span>${leverage}<span class="ticker">${esc(i.symbol)} · ${esc(i.market)}</span><div class="session">${esc(q?.session || '시세 대기')}${stale ? ' · 시세 확인 필요' : ''}</div></div><div><div class="price">${q ? number(q.last,i.currency) : '—'}</div><div class="asof">${q?.asof ? clock(q.asof) + ' 기준' : '기준 시각 없음'}</div></div></div>`;
+    return `<div class="watchrow"><span class="avatar ${avatarClass(i.symbol)}" aria-hidden="true">${esc([...String(i.name)][0] || '?')}</span><div><span class="name">${esc(i.name)}</span>${leverage}${whyText ? `<span class="why-tag ${whyCls}">${whyText}</span>` : ''}<span class="ticker">${esc(i.symbol)} · ${esc(i.market)}</span><div class="session">${esc(q?.session || '시세 대기')}${stale ? ' · 시세 확인 필요' : ''}</div></div><div><div class="price">${q ? number(q.last,i.currency) : '—'}</div><div class="asof">${q?.asof ? clock(q.asof) + ' 기준' : '기준 시각 없음'}</div></div></div>`;
   }).join(''));
   if ([...$('analyze-symbol').options].map(o => o.value).join('|') !== s.instruments.map(i => i.symbol).join('|')) {
     const selected = $('analyze-symbol').value;
@@ -413,13 +416,13 @@ function renderDecisions(s,now,auto) {
   $('pending-count').textContent = auto ? 'AUTO' : pending.length;
   if (auto) {
     const recent = s.trades.filter(t => t.execution_mode === 'auto').slice(-4).reverse();
-    setHtml('proposal-list', watchPanel(s, now) + `<div class="auto-note"><span class="pill">자동 모의매매</span><h3>${s.running ? '조건을 통과한 제안을 자동 체결합니다' : '시작을 기다리고 있습니다'}</h3><p>개별 승인 없이 가상 계좌에서만 매매합니다. 관망 의견이거나 정규장·시세·호가·자금 한도를 충족하지 못하면 거래하지 않습니다.</p>${s.strategy_mode === 'intraday' ? '<p>목표 비중·손절 위험·현금·매수 한도를 함께 반영해 종목마다 수량을 정합니다. 손절·익절·보유 기한 감시는 실행 중에만 작동합니다. ' + (s.config.conditional_entry ? '관망이어도 AI가 가격 조건을 남기면 서버가 그 가격만 지켜보다가 조건이 맞을 때 체결합니다(조건 진입).' : '조건 진입은 꺼져 있습니다.') + '</p>' : ''}<p class="muted small">1주 가격이 매수 한도를 넘는 종목도 건너뜁니다. 분석·체결이 없을 때는 운영 기록을 확인하세요.</p></div>` + (recent.length ? '<div class="auto-trades">' + recent.map(t => `<div><span>${esc(s.instruments.find(i => i.symbol === t.symbol)?.name || t.symbol)} <b>${t.side === 'BUY' ? '매수' : '매도'} ${t.quantity}주</b>${t.exit_reason ? '<small>' + esc(exitNames[t.exit_reason] || t.exit_reason) + '</small>' : t.entry_watch ? '<small>조건 진입</small>' : ''}</span><span class="muted small">${clock(t.time)}</span></div>`).join('') + '</div>' : empty('자동 체결 기록이 없습니다','시장 상황과 분석 결과에 따라 매매 없이 대기할 수 있습니다.')));
+    setHtml('proposal-list', watchPanel(s, now) + (recent.length ? '<div class="auto-trades">' + recent.map(t => `<div><span>${esc(s.instruments.find(i => i.symbol === t.symbol)?.name || t.symbol)} <b>${t.side === 'BUY' ? '매수' : '매도'} ${t.quantity}주</b>${t.exit_reason ? '<small>' + esc(exitNames[t.exit_reason] || t.exit_reason) + '</small>' : t.entry_watch ? '<small>조건 진입</small>' : ''}</span><span class="muted small">${clock(t.time)}</span></div>`).join('') + '</div>' : empty('자동 체결 기록이 없습니다','시장 상황과 분석 결과에 따라 매매 없이 대기할 수 있습니다.')));
     return;
   }
   setHtml('proposal-list', watchPanel(s, now) + (pending.length ? pending.map(p => {
     const i = s.instruments.find(i => i.symbol === p.symbol), remaining = Math.max(0,Math.floor(p.expires-now));
     return `<article class="proposal"><div class="proposal-head"><h3>${esc(i?.name || p.symbol)}</h3><span class="side ${p.side === 'SELL' ? 'sell' : ''}">${p.origin === 'watch' ? '조건 진입 · ' : ''}${p.side === 'BUY' ? '매수 제안' : '매도 제안'}</span></div><div class="proposal-values"><div><small>수량</small><strong>${p.quantity}주</strong></div><div><small>기준 호가</small><strong>${number(p.reference_price,i?.currency)}</strong></div><div><small>예상 금액 · 비용 제외</small><strong>${number(p.reference_price*p.quantity,i?.currency)}</strong></div></div>${tradePlan(p)}${p.exit_reason ? '<div class="exit-trigger">청산 사유 · ' + esc(exitNames[p.exit_reason] || p.exit_reason) + '</div>' : ''}<p>${esc(p.summary)}</p>${p.sizing ? sizingDetails(p.sizing,i?.currency) : ''}<div class="risks">${(p.risks || []).map(esc).join(' · ')}</div><div class="proposal-actions"><button class="secondary" data-id="${esc(p.id)}" data-action="reject">거절</button><button class="primary" data-id="${esc(p.id)}" data-action="approve">승인하고 모의체결</button></div><p class="expires">${remaining}초 후 만료 · 가격 0.5% 이상 변동 시 재분석</p></article>`;
-  }).join('') : empty('결정할 제안이 없습니다',s.running ? '분석이 끝나면 매매안과 반대 의견을 확인할 수 있습니다.' : '시작을 누르면 투자팀이 관심종목을 순서대로 분석합니다.')));
+  }).join('') : empty('결정할 제안이 없습니다',s.running ? '분석이 끝나면 매매안과 반대 의견을 확인할 수 있습니다.' : '시작을 누르면 신호가 켜진 종목을 분석합니다.')));
 }
 function tradePlan(report) {
   const values = [['목표 비중',report.target_weight_pct,plainPercent],['손절 간격',report.stop_loss_pct,plainPercent],['익절 간격',report.take_profit_pct,plainPercent],['보유 상한',report.max_holding_minutes,holdText]].filter(([,value]) => finite(value) && value > 0);
