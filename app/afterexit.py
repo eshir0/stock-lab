@@ -62,6 +62,13 @@ def record(state, symbol, position, trade, reason):
             **_setup(state, symbol, trip['opened'], buy), 'after': {}}
     if reason == TAKE:
         item['replay'] = {key: position.get(key) for key in ('average', 'stop_price', 'trail_pct', 'high_water', 'expires_at')}
+    elif position.get('exit_mode') == 'trail' and position.get('target_hit') and position.get('take_profit_price'):
+        # The other way round: this experiment kept the position past its target, so what selling AT the target (A) would
+        # have given is exactly known - the target, a resting limit - and C - A is the actual exit against it.
+        take = float(position['take_profit_price'])
+        item['target_hit'] = True
+        item['c'] = {'exit_price': item['exit_price'], 'why': '실제 추적 손절 청산 vs 익절가 매도', 'a_price': take,
+                     'extra_pct': round((item['exit_price']/take-1)*100, 4)}
     records = state.setdefault('after_exits', [])
     records.append(item)
     del records[:-KEEP]
@@ -152,7 +159,7 @@ def summary(state):
         rows.append({'style': style, 'label': label, 'exits': len(mine),
                      'd5_avg_pct': _avg([r['after']['d5'] for r in mine if r['after'].get('d5') is not None]),
                      'd20_avg_pct': _avg([r['after']['d20'] for r in mine if r['after'].get('d20') is not None]),
-                     'takes': sum(r['reason'] == TAKE for r in mine), 'replayed': len(settled),
+                     'takes': sum(r['reason'] == TAKE or bool(r.get('target_hit')) for r in mine), 'replayed': len(settled),
                      'c_minus_a_avg_pct': _avg(settled), 'c_better': sum(x > 0 for x in settled)})
     recent = [{k: r.get(k) for k in ('symbol', 'name', 'time', 'reason', 'exit_price', 'style', 'entry', 'after', 'c')}
               for r in records[-8:]]

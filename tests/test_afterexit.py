@@ -144,3 +144,19 @@ def test_a_conditional_entry_takes_its_setup_from_the_analysis_that_left_the_pla
              'watches': [{'id': 'w1', 'type': 'pullback'}]}
     assert afterexit._setup(state, '005930', 20, {'entry_watch': 'w1'}) == {'style': 'range', 'signals': {'mean_reversion': 'BUY'},
                                                                           'entry': 'pullback'}
+
+
+def test_in_trail_mode_a_target_that_was_passed_gives_the_exact_c_minus_a(desk):
+    with desk.store.edit() as s:
+        s['strategy_settings']['exit_mode'] = 'trail'
+    position = open_position(desk)
+    desk.provider.prices['005930'] = position['take_profit_price']+5000          # past the target: kept, trailing
+    desk.process_desk_exits()
+    pos = desk.store.read()['positions']['005930']
+    desk.provider.prices['005930'] = pos['stop_price']-100                      # the trailing stop sells it
+    desk.process_desk_exits()
+    state = desk.store.read()
+    x = state['after_exits'][-1]
+    assert x['target_hit'] and x['c']['a_price'] == position['take_profit_price']
+    assert x['c']['extra_pct'] == pytest.approx((x['exit_price']/position['take_profit_price']-1)*100, abs=1e-3)
+    assert 'replay' not in x and afterexit.summary(state)['rows'][0]['replayed'] == 1

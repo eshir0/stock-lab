@@ -417,7 +417,7 @@ class DeskMixin:
                                 'summary': reason+'에 따른 모의매도', 'risks': ['지정한 손절 가격은 체결 가격을 보장하지 않습니다.'],
                                 'sizing': {'quantity': qty, 'reason': reason},
                                 'position': {k: pos.get(k) for k in ('average', 'stop_price', 'trail_pct', 'high_water',
-                                                                     'expires_at')}}
+                                                                     'expires_at', 'take_profit_price', 'exit_mode', 'target_hit')}}
                     for other in s['proposals']:
                         if other['status'] == 'pending' and other['symbol'] == symbol:
                             other['status'] = 'invalidated'
