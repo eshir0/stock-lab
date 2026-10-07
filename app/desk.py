@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from . import afterexit, entry, evidence, gate, history, pacing, reuse
+from . import afterexit, entry, evidence, gate, history, pacing, reuse, splits
 from .agents import DESK_ROLES, STOPPED, market_context
 from .config import INSTRUMENTS as BASE_INSTRUMENTS
 from .instruments import INSTRUMENTS, SYMBOLS
@@ -66,6 +66,9 @@ def clock(timestamp):
     return datetime.fromtimestamp(timestamp, ZoneInfo('Asia/Seoul')).strftime('%H:%M')
 
 
+GAP_MIN_PCT = .3       # a stop exit this far below the stop price was crossed by a gap, not touched
+
+
 class DeskMixin:
     def daily_bars(self, symbol, now=None):
         """Completed daily bars of the last ~3 months, reused for a while. Raises ProviderError when unreadable."""
@@ -89,13 +92,9 @@ class DeskMixin:
         return {'source': pick.get('source'), 'score': pick.get('score'), 'ai': pick.get('ai')} if pick else None
 
     def interval_plan(self, state):
-        """(usual seconds between analyses, faster seconds while busy or None) for this experiment. A month plan checks
-        every ANALYSIS_INTERVAL_SECONDS (20 min). Day trading looks every DAYTRADE_INTERVAL_SECONDS (10 min) and every
-        DAYTRADE_ACTIVE_INTERVAL_SECONDS (5 min) while a position is open or a proposal waits."""
-        if state.get('strategy_mode') != 'intraday' or horizon_of(state.get('strategy_settings')) == 'month':
-            return self.c.interval_seconds, None
-        idle = self.c.daytrade_interval_seconds
-        return idle, min(idle, self.c.daytrade_active_interval_seconds)
+        """(usual seconds between analyses, faster seconds while busy or None): every ANALYSIS_INTERVAL_SECONDS (20 min).
+        The shorter day-trading intervals went with day trading (2026-10-01; code removed 2026-10-07)."""
+        return self.c.interval_seconds, None
 
     def window_usage(self):
         """(provider, percent used, reset time) of the five-hour window of the AI the next cycle runs on; the last two are
@@ -186,15 +185,6 @@ class DeskMixin:
             elif previous.get('skipped'):
                 event(s, '규칙 신호가 나타나 AI 분석을 다시 시작합니다: '+gate.summary_line([c for c in checks if c['eligible']]))
         return eligible, verdicts, bars
-
-    @staticmethod
-    def day_extra(state, symbol):
-        """Per-candidate daily volatility for the same-session selector, from today's focus data (no extra requests)."""
-        entry = (state.get('focus') or {}).get(SYMBOLS[symbol]['market']) or {}
-        metrics = (entry.get('metrics') or {}).get(symbol)
-        if not metrics:
-            return None
-        return {'daily_volatility': {k: metrics.get(k) for k in ('range_pct', 'atr_pct', 'avg_move_pct', 'volume_ratio')}}
 
     def month_extra(self, state, symbol, bars, verdicts):
         """Per-candidate facts the stock selector compares (month horizon)."""
@@ -306,6 +296,8 @@ class DeskMixin:
         trade = state['trades'][-1]
         trade['strategy_mode'] = 'intraday'
         trade['exit_reason'] = proposal.get('exit_reason', '')
+        if isinstance(proposal.get('gap_pct'), (int, float)):
+            trade['gap_pct'] = proposal['gap_pct']
         trade['sizing'] = copy.deepcopy(sizing)
         trade['origin'] = 'exit' if proposal.get('exit_reason') else proposal.get('origin', 'ai')
         if proposal.get('reused'):
@@ -359,6 +351,121 @@ class DeskMixin:
         except Exception as exc:
             event(s, '실거래 그림자 기록에 실패했습니다(모의매매에는 영향 없음): '+type(exc).__name__, 'warning')
 
+    def split_reference(self, state, symbol, now):
+        """What the held-aside quote is compared with: the last price seen before the jump, paired with the daily bar of
+        the day it was seen. The broker's bars are split-adjusted, so that bar's close divided into the price seen gives
+        the split ratio (splits.from_bars); without a split the two agree. A held position's stored last close is used
+        when there is no earlier quote."""
+        seen = state['quotes'].get(symbol) or {}
+        pos = state['positions'].get(symbol) or {}
+        if seen.get('last'):
+            day = splits.local_date(symbol, seen.get('asof') or seen.get('received') or now)
+            try:
+                bar = next((b for b in reversed(self.daily_bars(symbol, now)) if history.day_label(b['time']) == day), None)
+            except (ProviderError, KeyError, ValueError):
+                bar = None
+            if bar:
+                return {'time': bar['time'], 'close': seen['last'], 'day': day}
+        if pos.get('ref_close'):
+            return pos['ref_close']
+        return {'close': seen.get('last') or pos.get('average')}
+
+    def check_splits(self, now=None):
+        """Every poll, right after the quotes: a held or planned name whose new quote left the range one session allows was
+        kept aside by refresh() (state['split_quotes']). Here the split is confirmed from data and applied, or ruled out,
+        and the quote is released either way; until then nothing reads it (splits.py)."""
+        now = time.time() if now is None else now
+        state = self.store.read()
+        if state.get('strategy_mode') != 'intraday':
+            return
+        aside, checks = state.get('split_quotes') or {}, state.get('split_checks') or {}
+        for symbol in sorted(set(aside) | set(checks)):
+            if symbol not in SYMBOLS:
+                continue
+            check = checks.get(symbol)
+            if check and now-check.get('tried', 0) < splits.RETRY and now-check['since'] <= splits.GIVE_UP:
+                continue
+            quote = aside.get(symbol) or (check or {}).get('quote') or {}
+            price = quote.get('last')
+            ref = (check or {}).get('reference') or self.split_reference(state, symbol, now)
+            ratio = None
+            try:
+                fresh = history.completed_bars(self.provider.candles(symbol, '1d', history.FETCH_BARS), now)
+                self.daily_cache[symbol] = (now, fresh)
+                ratio = splits.from_bars(ref, fresh)
+            except (ProviderError, KeyError, ValueError):
+                pass
+            if ratio in (None, 1.0):
+                ratio = splits.from_pack(self.evidence.get(symbol, now), symbol, (ref or {}).get('time') or now-4*86400) or ratio
+            if ratio is None and ref and ref.get('close') and price and not splits.snap(ref['close']/price):
+                ratio = 1.0                    # the move matches no split ratio at all: it is a real move
+            with self.store.edit() as s:
+                held = s.setdefault('split_checks', {})
+                kept = s.setdefault('split_quotes', {})
+                name = SYMBOLS[symbol]['name']
+
+                def release():
+                    held.pop(symbol, None)
+                    q = kept.pop(symbol, None)
+                    if q and q.get('received', 0) >= (s['quotes'].get(symbol) or {}).get('received', 0):
+                        s['quotes'][symbol] = q
+                if ratio and ratio != 1.0:
+                    since = (held.get(symbol) or {}).get('since', now)
+                    text = splits.apply(s, symbol, ratio, since, 'detected', self.fractional(SYMBOLS[symbol]['currency']))
+                    release()
+                    if symbol in s['positions']:
+                        s['positions'][symbol].pop('ref_close', None)      # read again from the adjusted bars
+                    if text:
+                        event(s, text, 'warning')
+                    continue
+                if ratio == 1.0 or (check and now-check['since'] > splits.GIVE_UP):
+                    release()
+                    if check or ratio == 1.0:
+                        event(s, f'{name} 큰 가격 변동은 분할이 아니라 실제 움직임으로 확인되어 청산·조건 진입 규칙을 다시 적용합니다.'
+                                 if ratio == 1.0 else f'{name} 분할 여부를 {splits.GIVE_UP//3600}시간 동안 확인하지 못해 실제 가격 변동으로 보고 규칙을 다시 적용합니다.',
+                              'warning')
+                    continue
+                if symbol not in held:
+                    change = f'{price/ref["close"]*100-100:+.0f}%' if price and (ref or {}).get('close') else '큰 폭'
+                    held[symbol] = {'since': now, 'tried': now, 'reference': ref, 'quote': quote}
+                    event(s, f'{name} 시세가 직전 가격 대비 {change}로 한 번에 움직여 주식 분할일 수 있습니다. '
+                             '확인될 때까지 이 종목의 평가·손절·조건 진입에 새 시세를 쓰지 않습니다.', 'warning')
+                else:
+                    held[symbol].update(tried=now, quote=kept.get(symbol) or held[symbol].get('quote'))
+
+    def register_splits(self, now=None):
+        """At most every 15 minutes: splits in the archive's records (evidence packs) of names this experiment has scored,
+        held or planned are recorded, so a decision made before a split is scored on the adjusted bars. A split the monitor
+        already applied is recognised by its date and not applied twice."""
+        now = time.time() if now is None else now
+        if now-getattr(self, 'splits_at', 0) < 900:
+            return
+        self.splits_at = now
+        state = self.store.read()
+        if state.get('strategy_mode') != 'intraday':
+            return
+        names = set(state['positions']) | {w['symbol'] for w in entry.waiting(state)}
+        for e in state.get('evaluations') or []:
+            names |= {e.get('symbol')} | set(e.get('candidates') or {})
+        names |= {a.get('symbol') for a in state.get('after_exits') or []}
+        found = []
+        for symbol in sorted(n for n in names if n in SYMBOLS):
+            for item in (self.evidence.get(symbol, now) or {}).get('splits') or []:
+                ratio = splits.snap(item.get('ratio')) if isinstance(item.get('ex_date'), str) else None
+                if ratio and not splits.known(state, symbol, item['ex_date']):
+                    at = splits.day_start(symbol, item['ex_date'])
+                    if state['started_at'] < at <= now:
+                        found.append((symbol, ratio, at))
+        if not found:
+            return
+        with self.store.edit() as s:
+            if s['experiment_id'] != state['experiment_id']:
+                return
+            for symbol, ratio, at in found:
+                text = splits.apply(s, symbol, ratio, at, 'archive', self.fractional(SYMBOLS[symbol]['currency']))
+                if text:
+                    event(s, text, 'warning')
+
     def process_desk_exits(self):
         snapshot = self.store.read()
         if snapshot.get('strategy_mode') != 'intraday' or not snapshot['running'] or snapshot['liquidating']:
@@ -376,6 +483,8 @@ class DeskMixin:
                     pos = s['positions'].get(symbol)
                     if not pos or pos.get('strategy_mode') != 'intraday':
                         continue
+                    if symbol in (s.get('split_checks') or {}):
+                        continue                 # a possible split: neither the stop nor the trail reads this price yet
                     s['quotes'][symbol] = q
                     self.update_desk_risk(s)
                     now = time.time()
@@ -406,6 +515,10 @@ class DeskMixin:
                         reason = '종목 교체 청산'
                     if not reason:
                         continue
+                    # A stop crossed by a gap (the market opened below it) fills at the first price, exactly like a resting
+                    # stop order at the broker would: it fills at the open, not at the stop. Recorded so the cost of gaps shows.
+                    gap = (round((q['bid']/pos['stop_price']-1)*100, 2)
+                           if reason in ('손절 조건', '추적 손절(이익 보호)') and q['bid'] < pos['stop_price']*(1-GAP_MIN_PCT/100) else None)
                     qty = min(pos['quantity'], q['bid_size'], 10000)
                     if qty <= 0:
                         continue
@@ -416,7 +529,7 @@ class DeskMixin:
                                 'generation': gen, 'revision': s['revision'], 'mode': self.c.mode,
                                 'status': 'pending', 'strategy_mode': 'intraday', 'exit_reason': reason,
                                 'summary': reason+'에 따른 모의매도', 'risks': ['지정한 손절 가격은 체결 가격을 보장하지 않습니다.'],
-                                'sizing': {'quantity': qty, 'reason': reason},
+                                'sizing': {'quantity': qty, 'reason': reason}, **({'gap_pct': gap} if gap is not None else {}),
                                 'position': {k: pos.get(k) for k in ('average', 'stop_price', 'trail_pct', 'high_water',
                                                                      'expires_at', 'take_profit_price', 'exit_mode', 'target_hit')}}
                     for other in s['proposals']:
@@ -430,7 +543,8 @@ class DeskMixin:
                         for other in s['proposals']:
                             if other['status'] == 'pending':
                                 other['status'] = 'invalidated'
-                        event(s, f'{SYMBOLS[symbol]["name"]} {reason}: {qty}주 자동 모의매도')
+                        event(s, f'{SYMBOLS[symbol]["name"]} {reason}: {qty}주 자동 모의매도'
+                                 + (f' · 갭: 손절가보다 {gap:+.2f}%에서 체결(예약 손절 주문도 장 시작 가격에 체결됩니다)' if gap is not None else ''))
                     else:
                         event(s, f'{SYMBOLS[symbol]["name"]} {reason}: 모의매도 승인을 기다립니다.')
                     s['proposals'].append(proposal)
@@ -472,6 +586,8 @@ class DeskMixin:
         last = runs[-1]
         record = next((e for e in reversed(state.get('evaluations') or []) if e.get('run_id') == last['id']), None)
         then, current = (record or {}).get('price'), mid(quote)
+        if then:
+            then = then/splits.factor(state, symbol, last['time'])
         note = {'minutes_ago': int((now-last['time'])//60), 'stance': director.get('stance'),
                 'summary': str(director.get('summary') or '')[:500], 'price_then': then,
                 'price_change_pct': round((current/then-1)*100, 2) if then and current else None}
@@ -592,6 +708,8 @@ class DeskMixin:
             entry.close(watch, 'cancelled', f'{why}에서 빠져 취소했습니다.', now)
             event(s, f'{name} 조건 진입을 취소했습니다. {why}에서 빠졌습니다.')
             return False
+        if symbol in (s.get('split_checks') or {}):
+            return False                                   # a possible split: the plan's prices may be in old shares
         quote = s['quotes'].get(symbol)
         try:
             self.validate_quote(quote or {}, symbol)
@@ -777,8 +895,7 @@ class DeskMixin:
                    'portfolio': {'cash': snapshot['cash'][currency],
                                  'day_pnl_pct': (risk.get('day_pnl_pct') or {}).get(currency)},
                    'candidates': [dict(candidate_summary(c[0], c[2], c[3], snapshot, c[4], now,
-                                                         self.month_extra(snapshot, c[0], bars, verdicts) if month
-                                                         else self.day_extra(snapshot, c[0])),
+                                                         self.month_extra(snapshot, c[0], bars, verdicts) if month else None),
                                        **self.intel.features(c[0], market)) for c in market_pool]}
             try:
                 selection = self.agents.run('selector', ctx, gen)

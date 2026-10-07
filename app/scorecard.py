@@ -160,7 +160,14 @@ def report(trades, dividends=()):
                        'evidence_for': group([t for t in closed if t.get('evidence') == 'for']),
                        'evidence_against': group([t for t in closed if t.get('evidence') == 'against']),
                        'evidence_mixed': group([t for t in closed if t.get('evidence') in ('mixed', 'none')])},
-            'recent': closed[-RECENT:][::-1]}
+            'recent': closed[-RECENT:][::-1], 'gaps': gap_summary(trades)}
+
+
+def gap_summary(trades):
+    """Stop exits that a gap pushed below the stop (the market opened there): how many and how far past the stop they
+    filled. A resting stop order at a broker fills at the same opening price, so this is the cost of holding overnight."""
+    gaps = [t['gap_pct'] for t in trades if t.get('side') == 'SELL' and isinstance(t.get('gap_pct'), (int, float))]
+    return {'count': len(gaps), 'avg_pct': _avg(gaps), 'worst_pct': min(gaps) if gaps else None}
 
 
 def _price_entry(symbol, bars, started_at, previous=None):

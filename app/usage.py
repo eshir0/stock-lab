@@ -34,6 +34,9 @@ def window_pct(window, now):
     return round(max(0.0, min(1.0, float(value)))*100, 1)
 
 
+DIRECT_STALE = 600           # the direct read runs every 2 minutes: ten minutes without a success is a failure worth showing
+
+
 class UsageGate:
     def __init__(self, config, fetch=None, clock=time.time):
         self.c, self.clock = config, clock
@@ -72,6 +75,13 @@ class UsageGate:
         entry = data.get(provider) or {}
         result = {'name': provider, 'label': LABELS.get(provider, provider), 'state': 'ok', 'pct': None,
                   'windows': {}, 'until': None, 'note': ''}
+        direct = entry.get('direct') or {}
+        if direct.get('enabled') and direct.get('failed_at') and now-(direct.get('ok_at') or 0) > DIRECT_STALE:
+            # The bridge reads the usage straight from the account every 2 minutes; when that keeps failing (undocumented
+            # endpoints can change) the numbers below only come from call answers and the 3-hourly check.
+            since = direct.get('ok_at')
+            result['direct_note'] = ('사용량 직접 읽기 실패' + (f'({int((now-since)//60)}분째)' if since else '')
+                                     + ' · 호출 응답으로만 추정')
         cooldown = entry.get('cooldown_until')
         if isinstance(cooldown, (int, float)) and cooldown > now:
             return dict(result, state='exhausted', until=cooldown, note=f'사용량 소진 · {clock_text(cooldown)}까지')

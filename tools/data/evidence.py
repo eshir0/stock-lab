@@ -267,6 +267,29 @@ def dividends(path, market):
     return sorted(out, key=lambda x: x['ex_date'])
 
 
+def splits(path, market):
+    """Split dates (exchange local date) and ratios (new shares per old share) of the last 400 days. The site uses them to
+    keep a held position, a waiting plan and the scoring of a name right across a split."""
+    from zoneinfo import ZoneInfo
+    epath = path.parent/'events'/f'{path.stem}.json'
+    try:
+        items = (json.loads(epath.read_text()).get('splits') or {}).values()
+    except (OSError, ValueError):
+        return []
+    zone = ZoneInfo('Asia/Seoul' if market == 'KR' else 'America/New_York')
+    since = time.time()-400*86400
+    out = []
+    for x in items:
+        try:
+            ratio = float(x['numerator'])/float(x['denominator'])
+            when = int(x['date'])
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            continue
+        if when >= since and ratio > 0 and abs(ratio-1) > .01:
+            out.append({'ex_date': datetime.fromtimestamp(when, zone).date().isoformat(), 'ratio': round(ratio, 6)})
+    return sorted(out, key=lambda x: x['ex_date'])
+
+
 def main():
     sys.path.insert(0, '/app')
     from app.instruments import SYMBOLS
@@ -301,7 +324,7 @@ def main():
                           '비용(수수료·세금·슬리피지)과 사이트의 청산 방식(추적 손절, 21거래일) 반영.',
                 'signals_now': history['signals_now'], 'now': history['now'],
                 'group_base_rates': group_rates(research, market, etf), 'own_history': history['rules'],
-                'analogs': history.get('analogs'), 'regime': regimes[market], 'dividends': dividends(path, market)}
+                'analogs': history.get('analogs'), 'regime': regimes[market], 'dividends': dividends(path, market), 'splits': splits(path, market)}
         try:
             if not etf and market == 'US' and symbol in tickers:
                 pack['fundamentals'] = us_fundamentals(con, int(tickers[symbol]))

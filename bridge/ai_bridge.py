@@ -24,7 +24,9 @@ from urllib.parse import urlparse
 
 ENV_FILE = os.getenv('STOCKLAB_ENV', '/opt/stock-lab/.env')
 CLAUDE_TIMEOUT = {True: 280, False: 170}
-CODEX_TIMEOUT = {True: 280, False: 170}
+# Codex at effort high is slower than Claude: a full QQQ analysis on 2026-10-07 took 275 s for the company research with web
+# search (the old limit was 280 s) and 110 s for the tape. These limits leave room; the app waits longer than all of them.
+CODEX_TIMEOUT = {True: 420, False: 240}
 EXHAUSTED_COOLDOWN = 1800
 LIMIT_WORDS = ('usage limit', 'rate limit', 'limit reached', 'hit your limit', 'quota', 'resets')
 
@@ -453,8 +455,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._send(401, {'ok': False, 'message': 'unauthorized'})
             with _cooldown_lock:
                 readings = json.loads(json.dumps(_usage))
+                direct = json.loads(json.dumps(_direct))
+            enabled = load_env().get('USAGE_DIRECT', 'on').strip().lower() != 'off'
             self._send(200, {'ok': True, 'now': time.time(),
-                             'providers': {p: {'cooldown_until': cooling(p) or None, 'limits': readings.get(p)} for p in RUNNERS}})
+                             'providers': {p: {'cooldown_until': cooling(p) or None, 'limits': readings.get(p),
+                                               'direct': dict(direct.get(p) or {}, enabled=enabled)} for p in RUNNERS}})
         else:
             self._send(404, {'ok': False})
 
@@ -529,8 +534,22 @@ def _get_json(url, headers):
         return json.loads(r.read())
 
 
+_direct = {}           # provider -> {'ok_at', 'failed_at', 'error'}: whether the direct usage read still works
+
+
+def _direct_result(provider, error=None):
+    with _cooldown_lock:
+        entry = _direct.setdefault(provider, {})
+        if error is None:
+            entry.update(ok_at=time.time(), error='')
+        else:
+            entry.update(failed_at=time.time(), error=error)
+
+
 def read_direct(home=os.path.expanduser('~')):
-    """{provider: reading} for the providers whose usage could be read right now."""
+    """{provider: reading} for the providers whose usage could be read right now. Each provider's last success and last
+    failure are kept (`_direct`) and served with /usage, so the dashboard can say when the read stopped working: the
+    endpoints are undocumented and may change."""
     out = {}
     try:
         with open(os.path.join(os.environ.get('CODEX_HOME') or os.path.join(home, '.codex'), 'auth.json'), encoding='utf-8') as f:
@@ -541,8 +560,9 @@ def read_direct(home=os.path.expanduser('~')):
         reading = codex_reading(_get_json(CODEX_USAGE_URL, headers))
         if reading:
             out['codex'] = reading
-    except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError):
-        pass
+        _direct_result('codex', None if reading else 'unreadable answer')
+    except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError) as exc:
+        _direct_result('codex', type(exc).__name__)
     try:
         with open(os.path.join(home, '.claude', '.credentials.json'), encoding='utf-8') as f:
             token = json.load(f)['claudeAiOauth']['accessToken']
@@ -550,8 +570,9 @@ def read_direct(home=os.path.expanduser('~')):
                                                               'anthropic-beta': 'oauth-2025-04-20', 'Accept': 'application/json'}))
         if reading:
             out['claude'] = reading
-    except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError):
-        pass
+        _direct_result('claude', None if reading else 'unreadable answer')
+    except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError) as exc:
+        _direct_result('claude', type(exc).__name__)
     return out
 
 

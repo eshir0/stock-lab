@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from .agents import Agents, DESK_ROLES, market_context
 from .desk import DESK_CALLS
-from . import afterexit, entry, fx, hours
+from . import afterexit, splits, entry, fx, hours
 from .evidence import EvidenceStore
 from .evaluation import score_days, summarize, symbols_due, update_outcomes
 from .live.shadow import shadow_summary
@@ -277,9 +277,17 @@ class Engine(DeskMixin, FocusMixin):
                 self.provider.set_universe(sorted(symbols))
             quotes = self.provider.quotes()
             with self.store.edit() as s:
+                watched = set(s['positions']) | {w['symbol'] for w in entry.waiting(s)}
                 for symbol, q in quotes.items():
                     cached = s['quotes'].get(symbol, {})
                     if all(q[key] >= cached.get(key, 0) for key in ('received', 'asof', 'book_asof')):
+                        if symbol in watched and symbol in SYMBOLS:
+                            # A held or planned name that jumped out of one session's range may have split: its quote is
+                            # kept aside (check_splits) so no valuation, loss limit, stop or plan reads it yet.
+                            ref = cached.get('last') or ((s['positions'].get(symbol) or {}).get('ref_close') or {}).get('close')
+                            if symbol in (s.get('split_checks') or {}) or splits.suspicious(symbol, q.get('last'), ref):
+                                s.setdefault('split_quotes', {})[symbol] = q
+                                continue
                         s['quotes'][symbol] = q
                 s['last_error'] = ''
                 now = time.time()
@@ -624,7 +632,8 @@ class Engine(DeskMixin, FocusMixin):
                 raise RuleError(f'한 종목의 비중은 해당 통화 자산의 {name_ratio*100:g}%까지 허용됩니다.')
             new_cost = money(Decimal(str(cost_basis))+Decimal(str(total)))
             average = money(Decimal(str(new_cost))/new_qty)
-            s['positions'][symbol] = {**pos, 'quantity': shares.number(new_qty), 'average': average, 'cost_basis': new_cost}
+            s['positions'][symbol] = {**pos, 'quantity': shares.number(new_qty), 'average': average, 'cost_basis': new_cost,
+                                      'opened': pos.get('opened') or time.time()}
             s['cash'][currency] = money(Decimal(str(s['cash'][currency]))-Decimal(str(total)))
             realized = 0
         else:

@@ -8,6 +8,7 @@ Nothing here changes trading; it only measures whether the AI's calls beat doing
 """
 import math
 
+from . import splits
 from .rules import RULES
 from .scorecard import mean_ci
 
@@ -129,7 +130,9 @@ def score_days(s, now, bars_by_symbol):
     for entry in s.get('evaluations', []):
         if entry.get('horizon') != 'month':
             continue
-        prices = {entry['symbol']: entry['price'], **entry.get('candidates', {})}
+        # Daily bars are split-adjusted; a price recorded before a split is divided the same way (splits.py).
+        prices = {symbol: price/splits.factor(s, symbol, entry['time'])
+                  for symbol, price in {entry['symbol']: entry['price'], **entry.get('candidates', {})}.items()}
         for days in DAY_HORIZONS:
             key = f'd{days}'
             if key in entry['outcomes'] or now < entry['time']+days*86400:

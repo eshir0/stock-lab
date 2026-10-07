@@ -42,9 +42,9 @@ class FocusData(Exception):
 class FocusMixin:
     @staticmethod
     def focus_profile(state):
-        """What a good name looks like for this experiment: day trading wants names that move a lot within a day,
-        a month plan wants rising, not yet stretched names (see universe.PROFILES)."""
-        return 'volatility' if horizon_of(state.get('strategy_settings')) == 'intraday' else 'trend'
+        """What a good name looks like: rising, not yet stretched names (universe.PROFILES). The day-trading
+        'volatility' profile was removed with day trading."""
+        return 'trend'
 
     focus_pause = .25          # seconds between daily-candle reads: gentle on the chart rate group
     focus_retry_pause = 3.0    # seconds to wait after a 429 from the chart group before asking again
@@ -322,10 +322,8 @@ class FocusMixin:
 
     def run_trend_brief(self, state, market, session_date, passed, meta, now, profile='trend'):
         """Ask the AI for a news/theme read of the names that passed the data screen. Failure only removes the read."""
-        guards = ({'range_floor_pct': {k: v['range'][0] for k, v in universe.VOL_CAPS.items()},
-                   'falling_knife_5d_pct': universe.FALLING_KNIFE_5D} if profile == 'volatility' else
-                  {'ext_20d_cap_pct': {k: v['ext'] for k, v in universe.CAPS.items()},
-                   'run_5d_cap_pct': {k: v['run5'] for k, v in universe.CAPS.items()}})
+        guards = {'ext_20d_cap_pct': {k: v['ext'] for k, v in universe.CAPS.items()},
+                  'run_5d_cap_pct': {k: v['run5'] for k, v in universe.CAPS.items()}}
         context = {'strategy_mode': 'intraday', 'profile': profile, 'as_of_utc': datetime.now(timezone.utc).isoformat(),
                    'date': session_date, 'market': market, 'market_name': LABELS[market], 'max_picks': self.c.focus_per_market,
                    'candidates': universe.ai_candidates(passed),

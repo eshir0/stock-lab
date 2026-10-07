@@ -339,7 +339,7 @@ function render() {
     setRing('ai-ring', pct ?? 0, pct === null ? '—' : Math.round(pct) + '%');
     $('ai-cycle-budget').textContent = ai.providers.map(p => p.label + ' ' + (p.state === 'exhausted' ? p.note
       : Object.keys(p.windows).length ? Object.entries(p.windows).map(([n, w]) => (({five_hour: '5시간', seven_day: '주간'})[n] || n) + ' ' + Math.round(w.pct) + '%').join(' · ') + (p.state === 'high' ? ' (전환 기준 초과)' : '')
-        : '사용량 확인 전')).join(' | ') + ` · ${Math.round(ai.switch_pct)}%에서 다음 AI로 전환` + aiChecks(s);
+        : '사용량 확인 전') + (p.direct_note ? ' ⚠ ' + p.direct_note : '')).join(' | ') + ` · ${Math.round(ai.switch_pct)}%에서 다음 AI로 전환` + aiChecks(s);
   } else {
     const usedPct = dailyLimit ? Math.min(100, used / dailyLimit * 100) : 0;
     $('ai-usage').textContent = sim ? '외부 호출 없음' : `${used} / ${dailyLimit}`;
@@ -605,9 +605,7 @@ function focusPick(p, held, profile) {
   const score = finite(p.score) ? Math.max(0, Math.min(100, Math.round(p.score))) : 0;
   return `<li class="focus-pick"><div class="focus-head"><div><span class="name">${esc(p.name)}</span><span class="ticker">${esc(p.symbol)}</span>${kind ? `<span class="etf-tag">${esc(kind + lev)}</span>` : ''}</div><div class="focus-score"><b>${score}</b><span class="small muted">점</span></div></div>`
     + `<div class="focus-bar" aria-hidden="true"><span class="focus-bar-fill" data-w="${score}"></span></div>`
-    + (profile === 'volatility'
-      ? `<p class="focus-metrics small">하루 평균 변동폭 <b>${finite(p.range_pct) ? p.range_pct.toFixed(1) + '%' : '—'}</b> · 평균 등락 <b>${finite(p.avg_move_pct) ? p.avg_move_pct.toFixed(1) + '%' : '—'}</b> · 어제 거래량 <b>${finite(p.volume_ratio) ? p.volume_ratio.toFixed(1) + '배' : '—'}</b> · 5일 <b>${percent(p.ret_5d_pct)}</b>${esc(rank)}</p>`
-      : `<p class="focus-metrics small">최근 1개월 <b class="${p.ret_1m_pct >= 0 ? 'gain' : 'loss'}">${percent(p.ret_1m_pct)}</b> · 5일 <b>${percent(p.ret_5d_pct)}</b> · 20일선 대비 <b>${percent(p.ext_20d_pct)}</b> · 하루 변동폭 ${finite(p.atr_pct) ? p.atr_pct.toFixed(1) + '%' : '—'}${esc(rank)}</p>`)
+    + `<p class="focus-metrics small">최근 1개월 <b class="${p.ret_1m_pct >= 0 ? 'gain' : 'loss'}">${percent(p.ret_1m_pct)}</b> · 5일 <b>${percent(p.ret_5d_pct)}</b> · 20일선 대비 <b>${percent(p.ext_20d_pct)}</b> · 하루 변동폭 ${finite(p.atr_pct) ? p.atr_pct.toFixed(1) + '%' : '—'}${esc(rank)}</p>`
     + `<div class="focus-chips">${p.source === 'ai' ? '<span class="focus-chip ai">AI 선정</span>' : '<span class="focus-chip">데이터 선정</span>'}${held ? '<span class="focus-chip keep">보유 중</span>' : ''}${risk ? `<span class="focus-chip ${risk[0]}">선반영 위험 ${risk[1]}</span>` : ''}${ai?.theme ? `<span class="focus-chip">${esc(ai.theme)}</span>` : ''}</div>`
     + (ai ? `<p class="focus-why small"><b>재료</b> ${esc(ai.catalyst)} <span class="muted">· ${esc(ai.reason)}</span></p>` : '<p class="focus-why small muted">일봉 데이터 점수로 선정했습니다.</p>')
     + '</li>';
@@ -626,7 +624,7 @@ function focusColumn(market, entry, fixed, s) {
   } else if (entry && !fixed) {
     body += ai.market_view ? `<p class="focus-view">${esc(ai.market_view)}</p>` : '';
     body += Array.isArray(ai.themes) && ai.themes.length ? `<div class="focus-chips">${ai.themes.map(t => `<span class="focus-chip">${esc(t)}</span>`).join('')}</div>` : '';
-    body += entry.picks.length ? `<ol class="focus-list">${entry.picks.map(p => focusPick(p, held.has(p.symbol), entry.profile)).join('')}</ol>` : empty('조건을 통과한 종목이 없습니다', entry.profile === 'volatility' ? '오늘은 하루 변동폭이 충분히 큰 종목이 없어 이 시장은 신규 매수 없이 보유분만 관리합니다.' : '이 시장은 오늘 신규 매수 없이 보유분만 관리합니다.');
+    body += entry.picks.length ? `<ol class="focus-list">${entry.picks.map(p => focusPick(p, held.has(p.symbol), entry.profile)).join('')}</ol>` : empty('조건을 통과한 종목이 없습니다', '이 시장은 오늘 신규 매수 없이 보유분만 관리합니다.');
     body += (entry.notes || []).map(n => `<p class="small muted">${esc(n)}</p>`).join('');
     body += (ai.avoid || []).length ? `<p class="small muted"><b>오늘 피할 종목</b> ${ai.avoid.map(a => esc(a.symbol) + ' (' + esc(a.reason) + ')').join(' · ')}</p>` : '';
   }
@@ -635,10 +633,8 @@ function focusColumn(market, entry, fixed, s) {
 }
 function renderFocus(s) {
   const cfg = s.focus_config || {}, focus = s.focus || {}, fixed = s.strategy_mode !== 'intraday' || cfg.mode !== 'daily_focus';
-  $('focus-mode').textContent = fixed ? '고정 종목' : `일일 집중 · ${cfg.profile === 'volatility' ? '변동성 우선(단타)' : '추세 우선(스윙)'} · 시장별 ${cfg.per_market || 3}개`;
-  $('focus-intro').textContent = fixed || cfg.profile !== 'volatility'
-    ? '개장 90분 전에 후보 종목을 일봉 데이터로 먼저 거르고(하락 추세·이미 급등한 종목·거래대금 부족은 제외), AI가 뉴스와 테마를 확인해 시장별로 고릅니다. AI는 걸러진 후보 안에서만 고를 수 있고 출처가 없으면 반영하지 않습니다. 오늘 목록 밖의 종목은 신규 매수하지 않으며, 과거 성과 기준이라 수익을 보장하지 않습니다.'
-    : '단타 실험입니다. 개장 90분 전에 후보 종목의 하루 평균 변동폭(고가-저가)과 거래대금·거래량으로 먼저 거르고(움직임이 작은 종목·너무 거친 종목·5일 급락 중인 종목·거래대금 부족은 제외), AI가 오늘 움직일 재료(뉴스·실적·일정)가 있는 종목을 시장별로 고릅니다. 방향은 거르지 않습니다. AI는 걸러진 후보 안에서만 고를 수 있고 출처가 없으면 반영하지 않습니다. 오늘 목록 밖의 종목은 신규 매수하지 않으며, 변동이 크다는 것은 손실 위험도 크다는 뜻이라 수익을 보장하지 않습니다.';
+  $('focus-mode').textContent = fixed ? '고정 종목' : `일일 집중 · 추세 우선(스윙) · 시장별 ${cfg.per_market || 3}개`;
+  $('focus-intro').textContent = '개장 90분 전에 후보 종목을 일봉 데이터로 먼저 거르고(하락 추세·이미 급등한 종목·거래대금 부족은 제외), AI가 뉴스와 테마를 확인해 시장별로 고릅니다. AI는 걸러진 후보 안에서만 고를 수 있고 출처가 없으면 반영하지 않습니다. 오늘 목록 밖의 종목은 신규 매수하지 않으며, 과거 성과 기준이라 수익을 보장하지 않습니다.';
   $('sec-focus').classList.toggle('is-off', fixed);
   for (const m of ['KR', 'US']) setHtml('focus-' + m.toLowerCase(), focusColumn(m, focus[m], fixed, s));
   const rows = Object.entries(s.positions || {}).filter(([, p]) => p.rotation).map(([symbol, p]) => {
@@ -649,9 +645,7 @@ function renderFocus(s) {
   const e = s.focus_eval?.all, pp = v => percent(v).replace('%', '%p');
   $('focus-eval').textContent = !e || !e.days
     ? '선정 성과 채점: 아직 측정된 날이 없습니다. 선정 다음 거래일의 종가가 나오면 후보 전체 평균과 비교해 기록합니다. 표본이 쌓이기 전에는 이 방식의 효과를 판단할 수 없습니다.'
-    : (cfg.profile === 'volatility' && e.range_days)
-      ? `선정 성과(다음 거래일 하루 변동폭 기준, 표본 ${e.range_days}일): 선정 평균 ${e.range_pick_pct.toFixed(1)}% · 후보 전체 평균 ${e.range_pool_pct.toFixed(1)}% · 더 크게 움직인 날 ${e.wider_days}/${e.range_days}. 많이 움직였다는 뜻일 뿐 수익을 뜻하지 않고, 표본이 적으면 우연일 수 있습니다.`
-      : `선정 성과(종가 기준 참고, 표본 ${e.days}일): 선정 평균 ${percent(e.pick_pct)} · 후보 전체 평균 ${percent(e.pool_pct)} · 초과 ${pp(e.excess_pool_pct)}${finite(e.excess_fixed_pct) ? ` · 기존 고정 종목 대비 ${pp(e.excess_fixed_pct)}` : ''} · 이긴 날 ${e.beat_pool_days}/${e.days}. 표본이 적으면 우연일 수 있고 실제 매매 손익과는 다릅니다.`;
+    : `선정 성과(종가 기준 참고, 표본 ${e.days}일): 선정 평균 ${percent(e.pick_pct)} · 후보 전체 평균 ${percent(e.pool_pct)} · 초과 ${pp(e.excess_pool_pct)}${finite(e.excess_fixed_pct) ? ` · 기존 고정 종목 대비 ${pp(e.excess_fixed_pct)}` : ''} · 이긴 날 ${e.beat_pool_days}/${e.days}. 표본이 적으면 우연일 수 있고 실제 매매 손익과는 다릅니다.`;
   const excluded = ['KR', 'US'].map(m => {
     const list = focus[m]?.excluded || [];
     return list.length ? `<h4>${m === 'KR' ? '국내' : '미국'}</h4><ul class="focus-excluded-list">${list.map(x => `<li><strong>${esc(x.name)}</strong> <span class="muted">${esc(x.symbol)}</span> — ${esc((x.reasons || []).join(' · '))}</li>`).join('')}</ul>` : '';
@@ -724,7 +718,7 @@ function renderVerification(s) {
   const rows = [['AI 분석 매수', g.analysis], ['조건 진입', g.watch], ['조사 재사용', g.reused], ['새 조사', g.fresh], ['레버리지 ETF', g.leveraged], ['레버리지 제외', g.plain], ['과거 근거 우호적', g.evidence_for], ['과거 근거 불리', g.evidence_against], ['과거 근거 엇갈림·없음', g.evidence_mixed]]
     .filter(([, x]) => x && x.count).map(([name, x]) => `<tr><td>${name}</td><td>${x.count}건</td><td>${finite(x.win_rate_pct) ? x.win_rate_pct.toFixed(0) + '%' : '—'}</td><td>${pct(x.expectancy_pct)}</td><td>${x.ci_pct ? pct(x.ci_pct[0]) + ' ~ ' + pct(x.ci_pct[1]) : '—'}</td></tr>`).join('');
   const booked = Object.entries(r.pnl || {}).map(([cy, value]) => number(value, cy)).join(' · ') || '—';
-  const stats = r.closed ? `<dl class="verify-stats"><div><dt>승률</dt><dd>${finite(r.win_rate_pct) ? r.win_rate_pct.toFixed(0) + '%' : '—'} (${r.wins}승 ${r.losses}패)</dd></div><div><dt>평균 이익 / 손실</dt><dd>${pct(r.avg_win_pct)} / ${pct(r.avg_loss_pct)}</dd></div><div><dt>손익비</dt><dd>${finite(r.payoff) ? r.payoff.toFixed(2) : '—'}</dd></div><div><dt>거래당 기대값</dt><dd>${pct(r.expectancy_pct)}${r.ci_pct ? ` <small>(95% ${pct(r.ci_pct[0])} ~ ${pct(r.ci_pct[1])})</small>` : ''}</dd></div><div><dt>수익 팩터</dt><dd>${finite(r.profit_factor) ? r.profit_factor.toFixed(2) : '—'}</dd></div><div><dt>평균 보유</dt><dd>${finite(r.avg_days) ? r.avg_days.toFixed(1) + '일' : '—'}</dd></div><div><dt>실현 손익</dt><dd>${booked}</dd></div></dl>`
+  const stats = r.closed ? `<dl class="verify-stats"><div><dt>승률</dt><dd>${finite(r.win_rate_pct) ? r.win_rate_pct.toFixed(0) + '%' : '—'} (${r.wins}승 ${r.losses}패)</dd></div><div><dt>평균 이익 / 손실</dt><dd>${pct(r.avg_win_pct)} / ${pct(r.avg_loss_pct)}</dd></div><div><dt>손익비</dt><dd>${finite(r.payoff) ? r.payoff.toFixed(2) : '—'}</dd></div><div><dt>거래당 기대값</dt><dd>${pct(r.expectancy_pct)}${r.ci_pct ? ` <small>(95% ${pct(r.ci_pct[0])} ~ ${pct(r.ci_pct[1])})</small>` : ''}</dd></div><div><dt>수익 팩터</dt><dd>${finite(r.profit_factor) ? r.profit_factor.toFixed(2) : '—'}</dd></div><div><dt>평균 보유</dt><dd>${finite(r.avg_days) ? r.avg_days.toFixed(1) + '일' : '—'}</dd></div><div><dt>실현 손익</dt><dd>${booked}</dd></div>${r.gaps?.count ? `<div><dt>갭 손절</dt><dd>${r.gaps.count}건 · 손절가 대비 평균 ${pct(r.gaps.avg_pct)} <small>(최악 ${pct(r.gaps.worst_pct)})</small></dd></div>` : ''}</dl>`
     : '<p class="small muted">청산된 거래가 아직 없습니다. 거래가 끝나면 수수료·세금을 뺀 실제 장부 기준으로 계산합니다.</p>';
   const index = ['KRW', 'USD'].filter(cy => bench[cy]).map(cy => `${esc(bench[cy].name)} ${pct(bench[cy].return_pct)} (최대 낙폭 ${finite(bench[cy].max_drawdown_pct) ? bench[cy].max_drawdown_pct.toFixed(1) : '—'}%)`).join(' · ');
   const a = v.ai_vs_rule;

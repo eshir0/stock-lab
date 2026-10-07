@@ -434,3 +434,19 @@ def test_starting_without_any_usable_ai_says_so(tmp_path):
         client.post('/api/login', json={'password': cfg.password}, headers=headers)
         response = client.post('/api/start', json={}, headers=headers)
         assert response.status_code == 409 and 'AI_BRIDGE' in response.json()['detail']
+
+
+def test_a_failing_direct_usage_read_is_shown_on_the_provider():
+    """2026-10-07: the bridge reads the usage straight from the account every 2 minutes; the endpoints are undocumented, so
+    a read that keeps failing is shown instead of silently falling back to estimates."""
+    now = 1_000_000.0
+    c = SimpleNamespace(mode='toss', provider_order=['claude', 'codex'], ai_switch_pct=90.0)
+    data = {'claude': {'direct': {'enabled': True, 'ok_at': now-30*60, 'failed_at': now-60, 'error': 'HTTPError'}},
+            'codex': {'direct': {'enabled': True, 'ok_at': now-60, 'failed_at': now-30*60}}}
+    gate = UsageGate(c, fetch=lambda: data, clock=lambda: now)
+    claude, codex = gate.status('claude'), gate.status('codex')
+    assert claude['direct_note'] == '사용량 직접 읽기 실패(30분째) · 호출 응답으로만 추정' and claude['state'] == 'ok'
+    assert 'direct_note' not in codex                                    # it works again
+    data['claude']['direct']['enabled'] = False                          # USAGE_DIRECT=off: nothing to warn about
+    gate.cache = None
+    assert 'direct_note' not in gate.status('claude')

@@ -45,8 +45,6 @@ class Config:
     interval_seconds: int = max(60, int(os.getenv('ANALYSIS_INTERVAL_SECONDS', '1200')))
     # Day trading looks more often than a month plan: every 10 minutes, and every 5 while a position is open or a proposal
     # waits (a quick second look pays most then). Set both to the same value for a fixed interval.
-    daytrade_interval_seconds: int = max(60, int(os.getenv('DAYTRADE_INTERVAL_SECONDS', '600')))
-    daytrade_active_interval_seconds: int = max(60, int(os.getenv('DAYTRADE_ACTIVE_INTERVAL_SECONDS', '300')))
     # Daily focus list: names per market the intraday desk may buy, and whether the AI reads the news for it.
     focus_per_market: int = max(1, min(6, int(os.getenv('FOCUS_PER_MARKET', '3'))))
     focus_ai: bool = os.getenv('FOCUS_AI', 'on').strip().lower() not in ('off', 'false', '0', 'no')

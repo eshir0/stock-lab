@@ -59,6 +59,7 @@ def create_app(config=None, background=True, test=False):
         while True:
             try:
                 await asyncio.to_thread(engine.refresh)
+                await asyncio.to_thread(engine.check_splits)
                 await asyncio.to_thread(engine.process_desk_exits)
                 await asyncio.to_thread(engine.process_liquidation)
                 await asyncio.to_thread(engine.process_entry_watches)
@@ -92,7 +93,7 @@ def create_app(config=None, background=True, test=False):
                 raise
             except Exception:
                 pass
-            for job in (engine.scan_pool, engine.refresh_benchmark, engine.credit_dividends, engine.settle_fx, engine.lock_verdict, engine.check_providers,
+            for job in (engine.scan_pool, engine.register_splits, engine.refresh_benchmark, engine.credit_dividends, engine.settle_fx, engine.lock_verdict, engine.check_providers,
                         engine.notify):
                 try:
                     await asyncio.to_thread(job)

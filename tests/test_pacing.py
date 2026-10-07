@@ -69,7 +69,7 @@ def test_the_cost_estimate_is_the_median_of_recent_readings_and_skips_unusable_o
 
 # ---- in the desk -----------------------------------------------------------------------------------------------------------
 
-def make(tmp_path, pacing_on=True, horizon='intraday', **over):
+def make(tmp_path, pacing_on=True, horizon='month', **over):
     config = Config(database_url='sqlite:///'+str(tmp_path/'pace.db'), mode='demo', password=PASSWORD, session_secret=SECRET, toss_id='',
                     toss_secret='', gemini_key='', fee_kr=15, fee_us=15, sell_tax_kr=0, slippage_bps=5, quota_pacing=pacing_on,
                     bridge_url='http://bridge.invalid', bridge_token='t'*40, providers='claude,codex', ai_switch_pct=80.0, **over)
@@ -83,6 +83,7 @@ def make(tmp_path, pacing_on=True, horizon='intraday', **over):
     engine.refresh()
     engine.readings = {}
     engine.agents.gate.fetch = lambda: engine.readings
+    engine.signal_gate = False                             # every cycle analyses: the interval, not the gate, is under test
     engine.start()
     return engine, store
 
@@ -109,26 +110,28 @@ def test_the_desk_schedules_the_next_analysis_later_when_the_window_is_tight(des
     started = time.time()
     state = run_cycle(desk)
     info = state['pacing']
-    assert info['paced'] and info['base'] == 600 and info['pct'] == 20.0 and info['provider'] == 'claude'
-    assert 600 < gap(state, started) < 4500 and gap(state, started) == pytest.approx(info['interval'], abs=3)
-    expected = pacing.pace(600, pct=20.0, switch_pct=80.0, resets_at=info['resets_at'], until=info['until'], now=started, cost=pacing.COST_DEFAULT)
+    assert info['paced'] and info['base'] == 1200 and info['pct'] == 20.0 and info['provider'] == 'claude'
+    assert 1200 < gap(state, started) < 4500 and gap(state, started) == pytest.approx(info['interval'], abs=3)
+    expected = pacing.pace(1200, pct=20.0, switch_pct=80.0, resets_at=info['resets_at'], until=info['until'], now=started, cost=pacing.COST_DEFAULT)
     assert info['interval'] == pytest.approx(expected, abs=5)
 
 
-def test_with_room_to_spare_the_interval_stays_ten_minutes(desk):
+def test_with_room_to_spare_the_interval_stays_twenty_minutes(desk):
     set_usage(desk, .0, 0.3)                                             # the window resets in 18 minutes
     started = time.time()
     state = run_cycle(desk)
-    assert not state['pacing']['paced'] and 595 <= gap(state, started) <= 615
+    assert not state['pacing']['paced'] and 1195 <= gap(state, started) <= 1215
 
 
-def test_a_running_position_still_gets_the_quick_interval_as_its_floor(desk):
+def test_a_held_position_no_longer_shortens_the_interval(desk):
+    """The 5-minute 'busy' interval belonged to day trading (removed 2026-10-07): a month position is watched by the exit
+    monitor every poll, and the analysis interval stays the same."""
     set_usage(desk, .0, 0.2)
-    state = run_cycle(desk)                                              # the scripted answer buys, so the next look is the quick one
+    state = run_cycle(desk)                                              # the scripted answer buys
     assert state['positions']
     started = time.time()
     state = run_cycle(desk)
-    assert state['pacing']['base'] == 300 and 295 <= gap(state, started) <= 315
+    assert state['pacing']['base'] == 1200 and 1195 <= gap(state, started) <= 1215
 
 
 def test_pacing_can_be_switched_off(tmp_path):
@@ -136,7 +139,7 @@ def test_pacing_can_be_switched_off(tmp_path):
     set_usage(engine, .20, 2)
     started = time.time()
     state = run_cycle(engine)
-    assert not state['pacing']['paced'] and 595 <= gap(state, started) <= 615
+    assert not state['pacing']['paced'] and 1195 <= gap(state, started) <= 1215
     store.release()
 
 
@@ -145,7 +148,7 @@ def test_an_ai_without_a_usage_window_is_not_paced(desk):
     desk.agents.gate.cache = None
     started = time.time()
     state = run_cycle(desk)
-    assert not state['pacing']['paced'] and state['pacing']['pct'] is None and 595 <= gap(state, started) <= 615
+    assert not state['pacing']['paced'] and state['pacing']['pct'] is None and 1195 <= gap(state, started) <= 1215
 
 
 def test_a_month_plan_is_paced_the_same_way(tmp_path):
@@ -198,8 +201,8 @@ def test_the_dashboard_state_carries_the_pacing_numbers(desk):
     set_usage(desk, .20, 2)
     run_cycle(desk)
     public = desk.public_state()
-    assert public['pacing']['paced'] and public['pacing']['interval'] > public['pacing']['base'] == 600
-    assert public['config']['interval'] == 600 and public['config']['interval_active'] == 300
+    assert public['pacing']['paced'] and public['pacing']['interval'] > public['pacing']['base'] == 1200
+    assert public['config']['interval'] == 1200 and public['config']['interval_active'] is None
 
 
 def test_the_defaults_are_on_and_capped_at_seventy_five_minutes():

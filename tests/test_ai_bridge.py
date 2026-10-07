@@ -348,3 +348,11 @@ def test_bot_refusals_still_count_as_a_page_that_exists(monkeypatch):
     for status, ok in ((200, True), (403, True), (429, True), (404, False), (500, False)):
         monkeypatch.setattr(ai_bridge, 'fetch_status', lambda *a, s=status: (s, None))
         assert ai_bridge.reachable('https://news.example/a', ai_bridge.time.monotonic()+10) is ok
+
+
+def test_the_direct_usage_read_reports_each_providers_success_and_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(ai_bridge, '_direct', {})
+    assert ai_bridge.read_direct(home=str(tmp_path)) == {}               # no login files: both fail, and say so
+    assert ai_bridge._direct['claude']['error'] and ai_bridge._direct['codex']['error'] and 'ok_at' not in ai_bridge._direct['claude']
+    ai_bridge._direct_result('claude')
+    assert ai_bridge._direct['claude']['error'] == '' and ai_bridge._direct['claude']['ok_at'] >= ai_bridge._direct['claude']['failed_at']

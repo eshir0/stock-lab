@@ -1,9 +1,7 @@
 """Daily focus list: which names the desk may buy today. Pure functions, no I/O, paper-only.
 
-Two profiles decide what a good name looks like (`PROFILES`):
-- 'trend' (1-month swing): rising, not yet stretched, liquid names. This is the screen described below.
-- 'volatility' (same-session day trading): names that really move within a day (average daily high-low range) and trade
-  actively, in either direction, because a day trader earns on movement and pays the spread on every round trip.
+What a good name looks like (`PROFILES`): 'trend' (1-month swing) - rising, not yet stretched, liquid names. (The
+day-trading 'volatility' profile was removed on 2026-10-07, after day trading itself.)
 
 The list is built each morning in three steps, and every guard below is enforced by code, not by a prompt:
 
@@ -29,15 +27,8 @@ TOP_FOR_AI = 8                  # data-screen survivors shown to the AI
 ROTATION_WARMUP = 20*60         # a rotation sell waits until this long after the open (no opening-noise exits)
 MAX_DAILY_MOVE = 45.0           # % — a larger one-day move in adjusted candles is treated as a data problem
 MIN_TURNOVER = {'KRW': 50e9, 'USD': 300e6}   # average traded value over 20 sessions, in local currency
-PROFILES = ('trend', 'volatility')
+PROFILES = ('trend',)
 RANGE_DAYS = 10                 # sessions behind the average daily range and the average move
-VOL_CAPS = {  # range: (floor, ideal, wild) average daily high-low range in % of price: below the floor a day trader cannot
-              # cover the spread and fees, at the ideal the volatility score is full, above wild the book is too gappy
-    'stock': {'range': (1.8, 5.0, 15.0)},
-    'etf': {'range': (1.2, 3.0, 10.0)},
-    'lev': {'range': (2.0, 6.0, 20.0)}}
-FALLING_KNIFE_5D = -15.0        # %: the desk only buys, so a name in a five-day freefall is left out of a day-trading list
-VOL_WEIGHTS = {'volatility': .45, 'liquidity': .20, 'attention': .20, 'activity': .15}
 CAPS = {  # ext: % above the 20-day average; run5: five-day gain; atr: allowed average-true-range band (% of price)
     'stock': {'ext': 12.0, 'run5': 18.0, 'atr': (0.8, 6.0)},
     'etf': {'ext': 10.0, 'run5': 14.0, 'atr': (0.5, 5.0)},
@@ -115,8 +106,6 @@ def screen(m, item, relaxed=False, profile='trend'):
 
     `relaxed` skips only the traded-value floor (demo candles carry synthetic volume).
     """
-    if profile == 'volatility':
-        return screen_volatility(m, item, relaxed)
     caps = CAPS[kind_of(item)]
     reasons = []
     if m['last'] <= m['sma20']:
@@ -130,27 +119,6 @@ def screen(m, item, relaxed=False, profile='trend'):
     low, high = caps['atr']
     if not low <= m['atr_pct'] <= high:
         reasons.append(f'하루 변동폭 {m["atr_pct"]:.1f}%가 허용 범위({low:g}~{high:g}%) 밖')
-    if m['max_move_pct'] > MAX_DAILY_MOVE:
-        reasons.append(f'일봉에 {m["max_move_pct"]:.0f}% 급변이 있어 데이터 확인 필요')
-    if not relaxed and m['turnover'] < MIN_TURNOVER.get(item['currency'], math.inf):
-        reasons.append('평균 거래대금 부족')
-    return reasons
-
-
-def screen_volatility(m, item, relaxed=False):
-    """Day-trading screen: the name must really move within a day and trade actively. The direction is NOT screened
-    (the desk decides that intraday); only data problems, thin trading and a five-day freefall are."""
-    low, _, wild = VOL_CAPS[kind_of(item)]['range']
-    reasons = []
-    span = m.get('range_pct')
-    if not _finite(span):
-        reasons.append('하루 변동폭을 계산할 수 없음')
-    elif span < low:
-        reasons.append(f'하루 평균 변동폭 {span:.1f}%가 단타 기준({low:g}%)보다 작음 · 비용을 넘길 만큼 움직이지 않음')
-    elif span > wild:
-        reasons.append(f'하루 평균 변동폭 {span:.1f}%가 너무 큼({wild:g}% 초과) · 호가 공백·급변 위험')
-    if m['ret_5d_pct'] <= FALLING_KNIFE_5D:
-        reasons.append(f'최근 5일 {m["ret_5d_pct"]:+.1f}% 급락 중 · 떨어지는 칼날(매수만 가능한 매매라 제외)')
     if m['max_move_pct'] > MAX_DAILY_MOVE:
         reasons.append(f'일봉에 {m["max_move_pct"]:.0f}% 급변이 있어 데이터 확인 필요')
     if not relaxed and m['turnover'] < MIN_TURNOVER.get(item['currency'], math.inf):
@@ -199,29 +167,8 @@ def _attention(attention, symbol, kinds=('amount', 'volume')):
     return 100.0 if best <= 10 else 75.0 if best <= 30 else 45.0
 
 
-def _activity(ratio):
-    """Yesterday's volume against the 20-day average: a name that is trading more than usual is being noticed."""
-    return 50.0 if not _finite(ratio) else _clamp((ratio-.8)/1.2, 0, 1)*100
-
-
-def score_volatility(m, item, attention=None, relaxed=False):
-    kind = kind_of(item)
-    low, ideal, _ = VOL_CAPS[kind]['range']
-    floor = MIN_TURNOVER.get(item['currency'], 1)
-    parts = {
-        'volatility': _clamp(((m.get('range_pct') or 0)-low)/(ideal-low), 0, 1)*100,
-        'liquidity': 50.0 if relaxed else _clamp(math.log10(max(m['turnover'], 1)/floor), 0, 1)*100,
-        # today's biggest movers (gainers and losers lists) count as attention too: they are the volatile names.
-        'attention': _attention(attention, item['symbol'], ('amount', 'volume', 'gainers', 'losers')),
-        'activity': _activity(m.get('volume_ratio'))}
-    total = sum(VOL_WEIGHTS[k]*v for k, v in parts.items())
-    return round(_clamp(total, 0, 100), 1), {k: round(v, 1) for k, v in parts.items()}
-
-
 def score(m, item, attention=None, relaxed=False, profile='trend'):
     """0-100 score with its parts, so the owner can see why a name ranks where it does."""
-    if profile == 'volatility':
-        return score_volatility(m, item, attention, relaxed)
     kind = kind_of(item)
     caps = CAPS[kind]
     floor = MIN_TURNOVER.get(item['currency'], 1)
@@ -353,18 +300,6 @@ def outcome(record, series):
         after = [c for c in rows if c['time'] > ref[0]]
         return _pct(after[0]['close'], ref[1]) if after else None
 
-    def follow_range(symbol):
-        """The next completed day's high-low range in % of the reference close: how much the name really moved."""
-        ref = (record.get('ref') or {}).get(symbol)
-        rows = sorted((c for c in series.get(symbol) or [] if c.get('completed') and _finite(c.get('close')) and c['close'] > 0),
-                      key=lambda c: c['time'])
-        after = [c for c in rows if ref and c['time'] > ref[0]]
-        if not after:
-            return None
-        day = after[0]
-        span = day['high']-day['low'] if _finite(day.get('high')) and _finite(day.get('low')) and day['high'] >= day['low'] else abs(day['close']-ref[1])
-        return span/ref[1]*100
-
     def average(symbols, measure=follow):
         values = [v for v in (measure(s) for s in symbols) if v is not None]
         return (sum(values)/len(values), len(values)) if values else (None, 0)
@@ -376,12 +311,6 @@ def outcome(record, series):
     result = {'pick_pct': round(picks, 2), 'pool_pct': round(pool, 2), 'fixed_pct': _round(fixed),
               'excess_pool_pct': round(picks-pool, 2), 'excess_fixed_pct': _round(picks-fixed if fixed is not None else None),
               'n_picks': n_picks, 'n_pool': n_pool}
-    if record.get('profile') == 'volatility':
-        pick_range, _ = average(record.get('picks', []), follow_range)
-        pool_range, _ = average(list((record.get('ref') or {})), follow_range)
-        if pick_range is not None and pool_range is not None:
-            result.update(range_pick_pct=round(pick_range, 2), range_pool_pct=round(pool_range, 2),
-                          range_excess_pct=round(pick_range-pool_range, 2))
     return result
 
 
@@ -398,10 +327,5 @@ def summarize(history):
                    'excess_pool_pct': round(sum(excess)/len(excess), 2),
                    'excess_fixed_pct': round(sum(fixed)/len(fixed), 2) if fixed else None,
                    'beat_pool_days': sum(1 for e in excess if e > 0)}
-        ranged = [r for r in done if r.get('range_pick_pct') is not None]
-        if ranged:      # day-trading lists are judged on how much the picks really moved, not on the direction
-            summary.update(range_days=len(ranged), range_pick_pct=round(sum(r['range_pick_pct'] for r in ranged)/len(ranged), 2),
-                           range_pool_pct=round(sum(r['range_pool_pct'] for r in ranged)/len(ranged), 2),
-                           wider_days=sum(1 for r in ranged if r['range_excess_pct'] > 0))
         return summary
     return {'all': block(history), **{m: block([r for r in history if r.get('market') == m]) for m in ('KR', 'US')}}

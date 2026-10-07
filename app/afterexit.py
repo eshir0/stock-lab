@@ -15,7 +15,7 @@ both - so the result can be split by kind: if trend buys gain from C while range
 by kind. The summary is a reference figure, not a verification check, and is not part of the strategy fingerprint.
 """
 from .instruments import SYMBOLS
-from . import scorecard
+from . import scorecard, splits
 
 HORIZONS = (5, 20)
 KEEP = 200
@@ -123,21 +123,25 @@ def update(state, bars_by_symbol, now):
         if bars is None or _done(item):
             continue
         later = [b for b in bars if b['time'] > item['time']]
+        f = splits.factor(state, item['symbol'], item['time'])         # the bars are split-adjusted, the record is not
+        exit_price = item['exit_price']/f
         for days in HORIZONS:
             key = f'd{days}'
             if key in item['after']:
                 continue
             if len(later) >= days:
-                item['after'][key] = round((later[days-1]['close']/item['exit_price']-1)*100, 4)
+                item['after'][key] = round((later[days-1]['close']/exit_price-1)*100, 4)
                 added += 1
             elif now > item['time']+(2*days+7)*86400:
                 item['after'][key] = None                  # the bars never arrived
                 added += 1
         if 'replay' in item and 'c' not in item:
-            result = replay_trailing(item, later, now)
+            plan = {k: (v/f if k != 'trail_pct' and isinstance(v, (int, float)) and k != 'expires_at' else v)
+                    for k, v in item['replay'].items()}
+            result = replay_trailing(dict(item, exit_price=exit_price, replay=plan), later, now)
             if result is not None:
                 if 'exit_price' in result:
-                    result['extra_pct'] = round((result['exit_price']/item['exit_price']-1)*100, 4)
+                    result['extra_pct'] = round((result['exit_price']/exit_price-1)*100, 4)
                 item['c'] = result
                 added += 1
     return added
