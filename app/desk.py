@@ -678,12 +678,21 @@ class DeskMixin:
             note = '조건 진입이 꺼져 있어(CONDITIONAL_ENTRY=off) 계획을 저장하지 않았습니다.'
         elif (s['positions'].get(symbol) or {}).get('quantity'):
             note = '이미 보유 중인 종목이라 조건 진입을 만들지 않았습니다.'
-        elif len(entry.waiting(s)) >= entry.MAX_WAITING:
-            note = f'대기 중인 조건 진입이 이미 {entry.MAX_WAITING}개라 새로 만들지 않았습니다.'
         else:
             month = horizon_of(s.get('strategy_settings')) == 'month'
             fields, note = entry.plan_from(decision, quote=quote, horizon='month' if month else 'intraday', now=now,
                                            currency=item['currency'], min_take_pct=min_take_pct(self.c, item['currency'], quote, symbol))
+        sign = (run.get('evidence') or {}).get('sign') or 'none'
+        if fields is not None and sum(w.get('market') == item['market'] for w in entry.waiting(s)) >= entry.MAX_WAITING:
+            # Full: the new plan takes the place of the weakest one only if it ranks higher (entry.priority).
+            candidate = dict(fields, evidence_sign=sign, created=now, reference=mid(quote))
+            weak = entry.weakest(s, item['market'])
+            if entry.priority(candidate, mid(quote)) > entry.priority(weak):
+                entry.close(weak, 'replaced', f'{item["name"]}의 더 유리한 계획(근거·거리)에 자리를 내줬습니다.', now)
+                event(s, f'{weak["name"]} 조건 진입을 {item["name"]}의 새 계획으로 교체했습니다(시장별 {entry.MAX_WAITING}개 한도, 근거·진입 가격 거리 비교).')
+            else:
+                fields, note = None, (f'대기 중인 조건 진입이 시장별 {entry.MAX_WAITING}개로 차 있고, 이 계획이 가장 약한 계획'
+                                      f'({weak["name"]})보다 근거나 진입 가격 거리에서 낫지 않아 만들지 않았습니다.')
         if fields is None:
             run['watch'] = {'status': 'rejected', 'note': note}
             event(s, f'{item["name"]} · {note}')
@@ -692,6 +701,7 @@ class DeskMixin:
                                  horizon=horizon_of(s.get('strategy_settings')), reference=mid(quote), summary=decision['summary'],
                                  engine=decision.get('engine'), run_id=run['id'], generation=gen, now=now)
         watch['reused'] = bool(run.get('reuse'))
+        watch['evidence_sign'] = sign
         s.setdefault('watches', []).append(watch)
         entry.trim(s)
         run['watch'] = {'status': 'waiting', 'id': watch['id'], 'note': entry.describe(watch)}

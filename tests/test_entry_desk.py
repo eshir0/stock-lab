@@ -145,7 +145,8 @@ def test_a_name_that_is_already_held_gets_no_plan(day):
     assert state['runs'][-1]['watch'] == {'status': 'rejected', 'note': '이미 보유 중인 종목이라 조건 진입을 만들지 않았습니다.'}
 
 
-def test_at_most_three_plans_wait_at_once(day):
+def test_plans_of_another_market_do_not_fill_the_places(day):
+    """Until 2026-10-07 three plans in all were the limit; now each market has its own six (test_entry_limit.py)."""
     now = time.time()
     with day.store.edit() as s:
         for symbol in ('000660', 'AAPL', 'MSFT'):
@@ -153,8 +154,7 @@ def test_at_most_three_plans_wait_at_once(day):
             s['watches'].append(entry.make_watch(fields, symbol=symbol, name=symbol, market='US', currency='USD', horizon='intraday',
                                                  reference=1.0, summary='', engine='', run_id='x', generation=1, now=now))
     state = watched(day)
-    assert len(entry.waiting(state)) == 3 and all(w['symbol'] != '005930' for w in state['watches'])
-    assert '3개' in state['runs'][-1]['watch']['note']
+    assert len(entry.waiting(state)) == 4 and any(w['symbol'] == '005930' for w in entry.waiting(state))
 
 
 def test_a_newer_analysis_of_the_same_name_replaces_the_plan(day):

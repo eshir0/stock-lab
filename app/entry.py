@@ -24,7 +24,8 @@ CONFIRM_POLLS = 2                                           # fresh quotes in a 
 VOLUME_RATIO = 1.0                                          # a breakout also needs the last 5 minutes' volume at least this x the 20 before
 VOLUME_RECHECK = 30                                         # seconds before a breakout whose volume was not enough is looked at again
 MAX_FAILURES = 6                                            # refused or failed attempts (10 s apart) before a triggered plan is dropped
-MAX_WAITING = 3                                             # plans waiting at once
+MAX_WAITING = 6                                             # plans waiting at once, per market (was 3 in total until 2026-10-07)
+SIGN_RANK = {'for': 2, 'mixed': 1, 'none': 1, 'against': 0}   # the evidence summary of the analysis that made the plan
 KEEP = 60                                                   # finished watches kept in the ledger
 RESTART_GRACE = 300                                         # a restart this soon after the last quote keeps the waiting plans (a deploy); a longer outage drops them
 
@@ -106,6 +107,24 @@ def plan_from(decision, *, quote, horizon, now, currency, min_take_pct=0.0):
     return {'type': kind, 'level': level, 'invalidate': dead, 'expires': expires,
             'plan': {'target_weight_pct': weight, 'stop_loss_pct': stop, 'take_profit_pct': take,
                      'max_holding_minutes': decision['max_holding_minutes']}}, ''
+
+
+def priority(watch, price=None):
+    """How strongly a plan deserves one of the limited places: the evidence behind it first, then how close its level is to
+    the price (a nearer level is likelier to fill), then the newer analysis. Larger is better."""
+    price = price or watch.get('last_price') or watch.get('reference')
+    distance = abs(watch['level']/price-1)*100 if price else 100.0
+    return (SIGN_RANK.get(watch.get('evidence_sign') or 'none', 1), -round(distance, 2), watch.get('created', 0))
+
+
+def weakest(state, market):
+    """The waiting plan of `market` with the lowest priority, or None."""
+    plans = [w for w in waiting(state) if w.get('market') == market]
+    runs = {r.get('id'): r for r in state.get('runs') or []}
+    for w in plans:                      # plans made before 2026-10-07 carry no sign: take it from their analysis
+        if 'evidence_sign' not in w:
+            w['evidence_sign'] = ((runs.get(w.get('run_id')) or {}).get('evidence') or {}).get('sign') or 'none'
+    return min(plans, key=priority) if plans else None
 
 
 def make_watch(fields, *, symbol, name, market, currency, horizon, reference, summary, engine, run_id, generation, now):

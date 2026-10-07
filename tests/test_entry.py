@@ -79,7 +79,7 @@ def test_a_month_plan_may_sit_further_from_the_price_than_a_day_trade():
 
 def test_a_bad_moment_gets_a_few_retries_not_one_and_not_forever():
     assert 3 <= entry.MAX_FAILURES <= 12                       # ten seconds apart: a minute or so of patience
-    assert 1 <= entry.MAX_WAITING <= 5 and entry.CONFIRM_POLLS >= 2
+    assert 1 <= entry.MAX_WAITING <= 8 and entry.CONFIRM_POLLS >= 2
 
 
 def test_make_watch_carries_the_plan_and_starts_waiting():
