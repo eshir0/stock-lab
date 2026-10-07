@@ -207,3 +207,27 @@ def test_the_long_history_reaches_the_dashboard_but_its_chart_series_never_reach
         assert len(body['series']['monthly']) == 2 and body['long_term']['ret_1y_pct'] == 12.0
         assert client.get('/api/history/ZZZZ').json()['series'] is None
         assert client.get('/api/history/..%2Fetc').status_code in (200, 404) and client.get('/api/history/..%2Fetc').json().get('series') is None
+
+
+def test_a_us_name_in_a_long_exit_experiment_is_shown_the_long_exit_numbers():
+    """2026-10-07: the packs' replay used the old exit (1.5x ATR, 21 sessions) while US names of exit_profile=market_long
+    trade with 3x ATR and 63 sessions; the AI now sees the numbers of the exit it actually trades with."""
+    p = pack()
+    p['group_base_rates']['momentum']['us_long'] = {'develop_2006_2018': {'mean_pct': .64, 'ci95_pct': [-.07, 1.35]},
+                                                    'holdout_2019_2026': {'mean_pct': .95}}
+    p['own_history']['momentum']['replay_us_long'] = {'n': 30, 'mean_pct': 1.2}
+    assert evidence.exit_for({'exit_profile': 'market_long'}, 'US') == 'us_long'
+    assert evidence.exit_for({'exit_profile': 'market_long'}, 'KR') == 'base' and evidence.exit_for({}, 'US') == 'base'
+    long, base = evidence.triggers(p, ['momentum'], 'us_long')[0], evidence.triggers(p, ['momentum'])[0]
+    assert long['market_2006_2018_mean_pct'] == .64 and long['this_name_replay_mean_pct'] == 1.2 and '63거래일' in long['exit']
+    assert base['market_2006_2018_mean_pct'] == .4 and base['this_name_replay_mean_pct'] == .3 and '21거래일' in base['exit']
+    old = pack()                                                          # a pack without the long numbers: base, and said so
+    assert '21거래일' in evidence.triggers(old, ['momentum'], 'us_long')[0]['exit']
+    assert evidence.for_ai(p, ['momentum'], 'us_long')['exit_used'].endswith('63거래일')
+
+
+def test_research_v2_keeps_every_us_signal_and_the_korean_drops():
+    from app import gate
+    assert gate.dropped('research_v2', 'US', False) == set() and gate.dropped('research_v2', 'US', True) == set()
+    assert gate.dropped('research_v2', 'KR', False) == {'golden_cross', 'momentum', 'breakout'}
+    assert gate.dropped('research', 'US', False) == {'momentum', 'breakout'}               # saved experiments unchanged

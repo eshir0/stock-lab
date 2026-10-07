@@ -1,0 +1,8 @@
+{
+  "registered": "2026-10-07 (KST), before running",
+  "purpose": "The research signal filter (research_plan.json Q1) was decided with the old exit (stop 1.5x ATR, take 1.5x, 21 sessions). US names now trade with stop 3x ATR, take 3x stop, up to 63 sessions (exit_profile=market_long). Does the same drop rule give the same US signals under the new exit?",
+  "setup": "research.py on all US listed names (survivors), liquidity known at the entry, exit C (trailing stop, no sale at the target), stop 3.0x ATR, take 3.0x stop, hold 63, arm 0.5, trail 1.0x stop distance, real costs. Develop 2006-2018, holdout 2019-2026.",
+  "variants": ["all", "golden_cross", "momentum", "breakout", "mean_reversion", "trend"],
+  "rule": "Q1's rule, unchanged: a signal stops calling the AI for a group (US stock, US ETF) when its develop expectancy has a 95% CI entirely below 0 AND its holdout mean is below 0.",
+  "use": "If the resulting US drops equal today's (US stock: momentum, breakout; US ETF: breakout), nothing changes. If they differ, the new table becomes signal_filter=research_us_wide for NEW experiments only, and the report says which signals moved."
+}

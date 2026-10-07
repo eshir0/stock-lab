@@ -333,7 +333,7 @@ def create_app(config=None, background=True, test=False):
         daily_loss_limit_pct: float = Field(default=2, ge=1, le=10, allow_inf_nan=False, strict=True)
         max_holding_minutes: int | None = Field(default=None, ge=15, le=43200, strict=True)
         exit_mode: Literal['target', 'trail'] = 'trail'
-        signal_filter: Literal['all', 'research'] = 'research'
+        signal_filter: Literal['all', 'research', 'research_v2'] = 'research_v2'
         evidence: Literal['on', 'off'] = 'on'
         scan: Literal['focus', 'pool'] = 'pool'
         exit_profile: Literal['ai', 'market', 'market_long'] = 'market_long'

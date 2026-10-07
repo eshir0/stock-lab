@@ -150,8 +150,8 @@ def normalize_settings(settings=None):
         raise RiskError('후보 확인 범위는 focus 또는 pool이어야 합니다.')
     if use_evidence not in ('on', 'off'):
         raise RiskError('과거 근거 사용은 on 또는 off여야 합니다.')
-    if signal_filter not in ('all', 'research'):
-        raise RiskError('매수 신호 거르기는 all 또는 research여야 합니다.')
+    if signal_filter not in ('all', 'research', 'research_v2'):
+        raise RiskError('매수 신호 거르기는 all, research, research_v2 중 하나여야 합니다.')
     if exit_mode not in EXIT_MODES:
         raise RiskError('익절 방식은 target 또는 trail이어야 합니다.')
     return {'include_leveraged_etfs': leveraged, 'universe_mode': universe, 'horizon': horizon,

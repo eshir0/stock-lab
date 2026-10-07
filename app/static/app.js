@@ -172,7 +172,7 @@ $('experiment-open').onclick = () => {
   $('include-leveraged-etfs').checked = false;
   $('exit-mode').value = 'trail';
   $('exit-profile').value = 'market_long';
-  $('signal-filter').value = 'research';
+  $('signal-filter').value = 'research_v2';
   $('evidence-mode').value = 'on';
   $('scan-mode').value = 'pool';
   $('universe-mode').value = 'daily_focus';

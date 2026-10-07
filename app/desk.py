@@ -196,7 +196,9 @@ class DeskMixin:
                 'rule_signals': {k: v for k, v in (verdict.get('signals') or {}).items() if v},
                 'rule_triggers': [RULE_NAMES.get(r, r) for r in verdict.get('rules') or []],
                 'focus': self.focus_note(state, symbol),
-                **({'evidence': evidence.brief(self.evidence.get(symbol), verdict.get('rules'))} if self.uses_evidence(state) else {})}
+                **({'evidence': evidence.brief(self.evidence.get(symbol), verdict.get('rules'),
+                                               evidence.exit_for(state.get('strategy_settings'), SYMBOLS[symbol]['market']))}
+                   if self.uses_evidence(state) else {})}
 
     @staticmethod
     def uses_evidence(state):
@@ -942,8 +944,9 @@ class DeskMixin:
             context.pop('intraday_candles', None)
             if self.uses_evidence(account):
                 pack, fired = self.evidence.get(symbol), (verdicts.get(symbol) or {}).get('rules') or []
-                context['evidence'] = evidence.for_ai(pack, fired)
-                evidence_note = evidence.summary(pack, fired)
+                exit_used = evidence.exit_for(account.get('strategy_settings'), SYMBOLS[symbol]['market'])
+                context['evidence'] = evidence.for_ai(pack, fired, exit_used)
+                evidence_note = evidence.summary(pack, fired, exit_used)
         context['market_intel'] = self.intel.features(symbol, SYMBOLS[symbol]['market'])
         previous = self.previous_note(account, symbol, time.time(), quote)
         if previous:

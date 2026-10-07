@@ -57,3 +57,14 @@ def test_market_long_holds_us_names_for_ninety_days_and_korean_names_as_before(d
         assert state['positions']['005930']['expires_at']-time.time() <= 30*86400+600
     director = [ctx for role, ctx in desk.contexts if role == 'director' and ctx['symbol'] == 'AAPL']
     assert director and 'holding_rule' in director[-1]['constraints'] and 'stop_rule' in director[-1]['constraints']
+
+
+
+def test_a_holding_period_beyond_the_range_is_clamped_not_refused():
+    """2026-10-07 22:52: told about the 90-day US hold, both AIs answered 129,600 minutes and the analysis failed."""
+    from test_entry import director, judged
+    assert judged(director(max_holding_minutes=129600), horizon='month')['max_holding_minutes'] == 43200
+    assert judged(director(max_holding_minutes=10), horizon='month')['max_holding_minutes'] == 1440
+    assert judged(director(max_holding_minutes=20160.4), horizon='month')['max_holding_minutes'] == 20160
+    with pytest.raises(ValueError):
+        judged(director(max_holding_minutes='90일'), horizon='month')

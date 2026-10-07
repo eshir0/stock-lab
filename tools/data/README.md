@@ -45,6 +45,8 @@ flowchart LR
 
 - `research_plan_us_hold.json` + `portfolio.py`의 `hold`·`pool=pit` (2026-10-07): 미국 넓은 손절의 최대 보유 21/42/63거래일 비교(63 채택)와, 매달 그 당시 거래대금 상위 17종목으로 다시 계산한 사후 선택 측정(전략이 S&P 500보다 낮음).
 
+- `research_plan_us_signals.json` + `research.py --us-wide-signals` (2026-10-07): 미국 신호 필터를 넓은 손절·63거래일 기준으로 다시 잼(모든 신호가 두 기간 모두 플러스 → `research_v2`는 미국 제외 없음). `evidence.py`는 미국 종목에 이 청산 방식의 신호 성적(`us_long`)과 재현 성적(`replay_us_long`)도 넣음.
+
 ## 📁 폴더 구조
 
 ```

@@ -236,7 +236,7 @@ class Engine(DeskMixin, FocusMixin):
                 **({'stop_rule': '이 실험의 미국 종목은 서버가 손절 폭을 하루 변동폭(atr_pct)의 3배(2~15%), 익절 기준을 손절 폭의 3배로 정합니다. '
                                  'stop_loss_pct·take_profit_pct는 형식대로 채우되 이 값으로 바뀝니다. 손절이 넓은 만큼 수량은 위험 한도에 맞춰 줄어듭니다.'}
                    if wide_us(s.get('strategy_settings'), SYMBOLS[symbol]['market']) else {}),
-                **({'holding_rule': '이 실험의 미국 종목은 최대 90일(63거래일)까지 보유합니다. max_holding_minutes는 형식대로 채우되 서버가 90일로 정합니다.'}
+                **({'holding_rule': '이 실험의 미국 종목은 서버가 보유 기한을 90일(63거래일)로 정합니다. max_holding_minutes에는 허용 범위(1,440~43,200분) 안의 값을 그대로 쓰세요. 그 값은 무시되고 90일이 적용됩니다.'}
                    if (s.get('strategy_settings') or {}).get('exit_profile') == 'market_long' and SYMBOLS[symbol]['market'] == 'US' else {})}
 
     def risk_budget(self, state):

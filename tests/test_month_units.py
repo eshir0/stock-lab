@@ -136,18 +136,20 @@ def test_the_analysts_placeholder_numbers_are_valid_for_their_horizon():
         assert check(director(stance='HOLD', quantity=0, target_weight_pct=0, **fallback), horizon)['stance'] == 'HOLD'
 
 
-@pytest.mark.parametrize('over', [{'stop_loss_pct': 1}, {'max_holding_minutes': 60}, {'max_holding_minutes': 50000},
-                                  {'stop_loss_pct': 16, 'take_profit_pct': 40}])
+@pytest.mark.parametrize('over', [{'stop_loss_pct': 1}, {'stop_loss_pct': 16, 'take_profit_pct': 40}])
 def test_month_validation_rejects_intraday_style_numbers(over):
     with pytest.raises(ValueError):
         check(director(**over), 'month')
 
 
-def test_intraday_validation_is_unchanged_and_rejects_month_numbers():
+def test_a_holding_period_out_of_range_is_brought_into_it():
+    """Since 2026-10-07 a holding period outside the horizon's range is clamped, not refused: the server sets the real
+    limit, and refusing failed a whole analysis when both AIs wrote the 90-day US hold."""
+    assert check(director(max_holding_minutes=60), 'month')['max_holding_minutes'] == 1440
+    assert check(director(max_holding_minutes=50000), 'month')['max_holding_minutes'] == 43200
     ok = director(stop_loss_pct=2, take_profit_pct=4, max_holding_minutes=60)
     assert check(ok, 'intraday')['max_holding_minutes'] == 60
-    with pytest.raises(ValueError):
-        check(director(), 'intraday')                                            # 14 days is not a same-session plan
+    assert check(director(stop_loss_pct=2, take_profit_pct=4), 'intraday')['max_holding_minutes'] == BOUNDS['intraday']['holding'][1]
 
 
 def test_month_prompts_replace_the_role_texts_but_keep_the_same_roles():

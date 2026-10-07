@@ -21,13 +21,19 @@ REASONS = {'signal': '규칙 신호', 'requested': '직접 요청', 'no_signal':
 # Buy signals that no longer call the AI, per market and instrument type, from the pre-registered 2006-2026 research
 # (tools/data/research_plan.json, Q1): dropped where the develop period (2006-2018) had a 95% interval entirely below
 # zero AND the holdout (2019-2026) was negative too. Experiments choose it with strategy_settings.signal_filter.
-SIGNAL_FILTERS = ('all', 'research')
+SIGNAL_FILTERS = ('all', 'research', 'research_v2')
 RESEARCH_DROPS = {('KR', False): ('golden_cross', 'momentum', 'breakout'), ('US', False): ('momentum', 'breakout'),
                   ('US', True): ('breakout',)}
+# 'research_v2' (2026-10-07, tools/data/research_plan_us_signals.json): the same rule re-run for US names with the US exit
+# of exit_profile=market_long (stop 3x ATR, take 3x, 63 sessions). Under that exit no US signal fails the rule (momentum
+# and breakout turned positive in both periods), so US names drop nothing; Korean names keep Q1's drops.
+RESEARCH_V2_DROPS = {('KR', False): ('golden_cross', 'momentum', 'breakout')}
 
 
 def dropped(mode, market, etf):
     """The BUY rules this experiment ignores for a name of this market and type."""
+    if mode == 'research_v2':
+        return set(RESEARCH_V2_DROPS.get((market, bool(etf)), ()))
     return set(RESEARCH_DROPS.get((market, bool(etf)), ())) if mode == 'research' else set()
 
 

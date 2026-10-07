@@ -80,7 +80,9 @@ def regime(market):
     return out
 
 
-def group_rates(research, market, etf):
+def group_rates(research, market, etf, us_long=None):
+    """The market's per-rule results (research.json Q1, old exit), and for US names the same rule under the US exit of
+    exit_profile=market_long (research-us-wide-signals.json) when that study exists."""
     group = f'{market} {"ETF" if etf else "stock"}'
     out = {}
     for v in research['variants'].values():
@@ -91,6 +93,12 @@ def group_rates(research, market, etf):
         out[p['sig']] = {'develop_2006_2018': {'trades': d.get('n'), 'mean_pct': d.get('mean'), 'ci95_pct': d.get('ci'), 'win_pct': d.get('win')},
                          'holdout_2019_2026': {'trades': h.get('n'), 'mean_pct': h.get('mean'), 'win_pct': h.get('win')},
                          'dropped_by_site_filter': p['sig'] in DROPS.get((market, etf), ())}
+    for v in ((us_long or {}).get('variants') or {}).values() if market == 'US' else ():
+        sig = v['params']['sig']
+        if sig in out:
+            d, h = v['develop'][group], v['holdout'][group]
+            out[sig]['us_long'] = {'develop_2006_2018': {'trades': d.get('n'), 'mean_pct': d.get('mean'), 'ci95_pct': d.get('ci')},
+                                   'holdout_2019_2026': {'trades': h.get('n'), 'mean_pct': h.get('mean')}}
     return out
 
 
@@ -148,6 +156,11 @@ def own(df, market, etf):
                                    BASE['stop'], BASE['take'], BASE['hold'], BASE['arm'], BASE['trail'], cost)
         out['rules'][rule] = {'replay_site_exit': {**dist(rets), 'avg_hold_days': r(helds.mean(), 1) if len(helds) else None},
                               'forward_5d': dist(fwd5[mask]), 'forward_21d': dist(fwd21[mask])}
+        if market == 'US':
+            # The US exit of exit_profile=market_long (research_plan_us_hold.json): stop 3x ATR, take 3x stop, 63 sessions.
+            ts, rets, helds = simulate(adj['open'].to_numpy(), adj['high'].to_numpy(), adj['low'].to_numpy(), c, mask, atr,
+                                       3.0, 3.0, 63, BASE['arm'], BASE['trail'], cost)
+            out['rules'][rule]['replay_us_long'] = {**dist(rets), 'avg_hold_days': r(helds.mean(), 1) if len(helds) else None}
     now = {rule: bool(sig[rule].iloc[-1]) for rule in RULES}
     out['signals_now'] = {k: 'BUY' if v else None for k, v in now.items()}
     firing = [k for k, v in now.items() if v]
@@ -294,6 +307,8 @@ def main():
     sys.path.insert(0, '/app')
     from app.instruments import SYMBOLS
     research = json.loads((DATA/'results'/'research.json').read_text())
+    wide = DATA/'results'/'research-us-wide-signals.json'
+    us_long = json.loads(wide.read_text()) if wide.exists() else None
     us_etf = pd.read_parquet(DATA/'universe'/'us.parquet').set_index('symbol')['etf'].to_dict()
     kr_etf = pd.read_parquet(DATA/'universe'/'kr.parquet').set_index('symbol')['etf'].to_dict()
     tickers = pd.read_parquet(DATA/'sec'/'tickers.parquet').set_index('ticker')['cik'].to_dict() if (DATA/'sec'/'tickers.parquet').exists() else {}
@@ -321,9 +336,10 @@ def main():
                 'long_term': long_summary, 'series': long_series,
                 'as_of_bar': history['last_bar'],
                 'method': '과거 20년 데이터(2006~, 국내는 상장 폐지 종목 포함)로 서버가 계산한 사실. 규칙대로 샀을 때의 결과이며 AI 판단의 결과가 아님. '
-                          '비용(수수료·세금·슬리피지)과 사이트의 청산 방식(추적 손절, 21거래일) 반영.',
+                          '비용(수수료·세금·슬리피지) 반영. 청산 방식: 기본은 추적 손절(손절 1.5×ATR)·21거래일, 미국의 us_long·replay_us_long은 '
+                          '손절 3×ATR·최대 63거래일(넓은 손절 실험). triggered_rules는 이 실험의 청산 방식에 맞는 값.',
                 'signals_now': history['signals_now'], 'now': history['now'],
-                'group_base_rates': group_rates(research, market, etf), 'own_history': history['rules'],
+                'group_base_rates': group_rates(research, market, etf, us_long), 'own_history': history['rules'],
                 'analogs': history.get('analogs'), 'regime': regimes[market], 'dividends': dividends(path, market), 'splits': splits(path, market)}
         try:
             if not etf and market == 'US' and symbol in tickers:

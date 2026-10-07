@@ -176,12 +176,25 @@ def stats(months, rets):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--workers', type=int, default=3)
+    p.add_argument('--us-wide-signals', action='store_true',
+                   help='research_plan_us_signals.json: Q1 signal variants with the US exit (3x ATR, 3x, 63), US names only')
     a = p.parse_args()
+    if a.us_wide_signals:
+        global variants
+        base_variants = variants
+
+        def variants():
+            out = {}
+            for s in SIGNALS:
+                v = {**BASE, 'sig': s, 'stop': 3.0, 'take': 3.0, 'hold': 63}
+                out['|'.join(f'{k}={v[k]}' for k in BASE)] = {'params': v, 'questions': ['US-wide']}
+            return out
     specs = {k: v['params'] for k, v in variants().items()}
     us = pd.read_parquet(DATA/'universe'/'us.parquet').set_index('yahoo')['etf'].to_dict()
     kr = pd.read_parquet(DATA/'universe'/'kr.parquet').set_index('yahoo')['etf'].to_dict()
     jobs = []
-    for market, etfs, folder in (('US', us, 'US'), ('KR', kr, 'KR'), ('KR', {}, 'KR_DELISTED')):
+    folders = (('US', us, 'US'),) if a.us_wide_signals else (('US', us, 'US'), ('KR', kr, 'KR'), ('KR', {}, 'KR_DELISTED'))
+    for market, etfs, folder in folders:
         for path in sorted((DATA/'daily'/folder).glob('*.parquet')):
             jobs.append((path, market, bool(etfs.get(path.stem, False)), specs))
     if os.environ.get('LIMIT'):
@@ -192,7 +205,8 @@ def main():
             for key, group, months, rets, helds in result:
                 parts.setdefault(key, []).append((group, months, rets, helds))
     dev_end = int(DEV_END[:4])*100+1
-    report = {'plan': json.loads((Path(__file__).parent/'research_plan.json').read_text()), 'variants': {}}
+    plan_file = 'research_plan_us_signals.json' if a.us_wide_signals else 'research_plan.json'
+    report = {'plan': json.loads((Path(__file__).parent/plan_file).read_text()), 'variants': {}}
     for key, info in variants().items():
         rows = parts.get(key, [])
         g = np.concatenate([np.full(len(m), gr, np.int8) for gr, m, _, _ in rows]) if rows else np.array([], np.int8)
@@ -211,7 +225,7 @@ def main():
         report['variants'][key] = entry
     out = DATA/'results'
     out.mkdir(exist_ok=True)
-    (out/'research.json').write_text(json.dumps(report, ensure_ascii=False, indent=1))
+    (out/('research-us-wide-signals.json' if a.us_wide_signals else 'research.json')).write_text(json.dumps(report, ensure_ascii=False, indent=1))
     print('variants', len(report['variants']))
 
 

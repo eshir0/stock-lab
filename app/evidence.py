@@ -58,13 +58,26 @@ def _mean(block, *path):
     return block if isinstance(block, (int, float)) and not isinstance(block, bool) else None
 
 
-def triggers(pack, rules):
-    """The facts about each rule that started this analysis, side by side."""
+EXITS = {'base': '추적 손절 · 손절 1.5×ATR · 최대 21거래일', 'us_long': '추적 손절 · 손절 3×ATR · 최대 63거래일'}
+
+
+def exit_for(settings, market):
+    """Which archived exit matches how this experiment trades a name: US names of exit_profile=market_long trade with the
+    wide stop and 63 sessions ('us_long'); everything else with the base exit the packs were first built on."""
+    return 'us_long' if market == 'US' and (settings or {}).get('exit_profile') == 'market_long' else 'base'
+
+
+def triggers(pack, rules, exit='base'):
+    """The facts about each rule that started this analysis, side by side, for the exit this experiment uses (a pack
+    built before the long-exit numbers existed falls back to the base exit and says so)."""
     out = []
     for rule in rules or []:
         group = (pack.get('group_base_rates') or {}).get(rule) or {}
         own = (pack.get('own_history') or {}).get(rule) or {}
-        out.append({'rule': rule, 'name': RULE_NAMES.get(rule, rule),
+        used = 'base'
+        if exit == 'us_long' and group.get('us_long') and own.get('replay_us_long'):
+            group, own, used = dict(group['us_long'], dropped_by_site_filter=False), dict(own, replay_site_exit=own['replay_us_long']), 'us_long'
+        out.append({'rule': rule, 'name': RULE_NAMES.get(rule, rule), 'exit': EXITS[used],
                     'market_2006_2018_mean_pct': _mean(group, 'develop_2006_2018', 'mean_pct'),
                     'market_2006_2018_ci95_pct': (group.get('develop_2006_2018') or {}).get('ci95_pct'),
                     'market_2019_2026_mean_pct': _mean(group, 'holdout_2019_2026', 'mean_pct'),
@@ -79,7 +92,7 @@ FLAT_PCT = .1           # a per-trade mean after costs closer to zero than this 
 FLAT_ANALOG_PCT = .5    # the same for the analogs' 21-day excess over the name's usual 21 days (a noisier number)
 
 
-def summary(pack, rules):
+def summary(pack, rules, exit='base'):
     """{'sign', 'up', 'down', 'flat', 'as_of'}: how many of the archive's numbers point up or down for the triggering rules.
 
     Each rule gives three votes (the market's 2006-2018 and 2019-2026 means, this name's replay), all per trade after
@@ -89,7 +102,7 @@ def summary(pack, rules):
     if not pack:
         return {'sign': 'none'}
     votes = []
-    for t in triggers(pack, rules):
+    for t in triggers(pack, rules, exit):
         votes += [(t[k], FLAT_PCT) for k in ('market_2006_2018_mean_pct', 'market_2019_2026_mean_pct', 'this_name_replay_mean_pct')]
     analogs = pack.get('analogs') or {}
     analog, usual = _mean(analogs, 'forward_21d', 'mean_pct'), _mean(analogs, 'baseline_forward_21d', 'mean_pct')
@@ -101,18 +114,19 @@ def summary(pack, rules):
     return {'sign': sign, 'up': up, 'down': down, 'flat': len(votes)-up-down, 'as_of': pack.get('as_of_bar')}
 
 
-def for_ai(pack, rules):
+def for_ai(pack, rules, exit='base'):
     if not pack:
         return {'available': False, 'note': '오늘의 과거 근거 묶음이 없습니다(수집 중이거나 오래됨). 근거 묶음 없이 판단하세요.'}
     body = {k: v for k, v in pack.items() if k not in ('built_at', 'series')}     # chart series are for the dashboard only
-    return {'available': True, 'triggered_rules': triggers(pack, rules), 'summary': summary(pack, rules), **body}
+    return {'available': True, 'exit_used': EXITS['us_long' if exit == 'us_long' else 'base'],
+            'triggered_rules': triggers(pack, rules, exit), 'summary': summary(pack, rules, exit), **body}
 
 
-def brief(pack, rules):
+def brief(pack, rules, exit='base'):
     """A few numbers for the stock selector's candidate list."""
     if not pack:
         return None
-    return {'summary': summary(pack, rules), 'triggered_rules': triggers(pack, rules),
+    return {'summary': summary(pack, rules, exit), 'triggered_rules': triggers(pack, rules, exit),
             'analogs_21d': (pack.get('analogs') or {}).get('forward_21d'), 'now': pack.get('now'),
             'long_term': {k: (pack.get('long_term') or {}).get(k) for k in ('ret_1y_pct', 'ret_5y_pct', 'position_in_52w_pct',
                                                                      'from_all_time_high_pct', 'max_drawdown_pct')}}

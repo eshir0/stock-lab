@@ -232,7 +232,7 @@ MONTH_PROMPTS = {
 # experiments without it - and the verification fingerprint, which hashes desk_prompts() - stay as they were.
 _EVIDENCE = (' context.evidence는 서버가 과거 20년 데이터(2006년~, 국내는 상장 폐지 종목 포함)로 계산한 사실 묶음입니다: '
              'triggered_rules(이번 분석을 시작한 규칙 신호가 같은 시장·종목 유형에서 2006~2018년과 2019~2026년에 낸 거래당 평균 결과, '
-             '이 종목에서 같은 신호의 결과), analogs(이 종목에서 같은 신호 조합·같은 시장 상황일 때 21거래일 뒤 결과. baseline_forward_21d는 같은 시장 상황의 아무 날이나 샀을 때라 이것과 비교해야 신호의 효과입니다), regime(시장 상황), '
+             '이 종목에서 같은 신호의 결과. exit는 그 수치를 낸 청산 방식으로, 이 실험이 이 종목에 쓰는 방식과 같습니다), analogs(이 종목에서 같은 신호 조합·같은 시장 상황일 때 21거래일 뒤 결과. baseline_forward_21d는 같은 시장 상황의 아무 날이나 샀을 때라 이것과 비교해야 신호의 효과입니다), regime(시장 상황), '
              'fundamentals(재무·공시와 공시일), now(현재 위치), long_term(상장 이후 전체 기록: 1·3·5·10년 수익률, 52주 범위와 그 안의 위치, '
              '역대 고점 대비, 역대 최대 낙폭과 회복 기간, 최근 10년 연도별 수익률). 최근 3개월 일봉만 보지 말고 장기 흐름에서 지금이 어디쯤인지 함께 판단하세요. 수치는 비용을 뺀 "규칙대로 샀을 때"의 통계이며 미래를 보장하지 않습니다. '
              '근거 묶음의 수치는 출처 URL이 아니므로 evidence 배열의 URL로 쓰지 마세요. available이 false면 근거 묶음 없이 판단하세요.')
@@ -519,8 +519,13 @@ def validate_report(report, role, context, sources, desk=False):
     for key, low, high in (('target_weight_pct', 0, position_pct), ('stop_loss_pct', *bounds['stop']), ('take_profit_pct', bounds['take'][0], 40)):
         if not _finite(report.get(key), low, high):
             raise ValueError('invalid strategy '+key)
-    if type(report.get('max_holding_minutes')) is not int or not bounds['holding'][0] <= report['max_holding_minutes'] <= bounds['holding'][1]:
+    holding = report.get('max_holding_minutes')
+    if isinstance(holding, bool) or not isinstance(holding, (int, float)) or not math.isfinite(holding):
         raise ValueError('invalid holding period')
+    # A number outside the range is brought into it rather than failing the whole analysis: the server sets the real
+    # limit anyway (2026-10-07: told that US names may be held 90 days, both AIs answered 129,600 minutes and every
+    # report of the night's first analysis was refused).
+    report['max_holding_minutes'] = int(min(max(round(holding), bounds['holding'][0]), bounds['holding'][1]))
     if role == 'director' and report['stance'] == 'BUY' and report['take_profit_pct'] < report['stop_loss_pct']*1.5:
         raise ValueError('insufficient target risk/reward')
     tasks = report.get('tasks')

@@ -71,7 +71,7 @@ def test_the_desk_applies_the_filter_per_market_and_type(tmp_path, monkeypatch):
         next(gen, None)
 
 
-def test_new_experiments_default_to_the_research_filter(tmp_path):
+def test_new_experiments_default_to_the_research_v2_filter(tmp_path):
     config = Config(database_url='sqlite:///'+str(tmp_path/'x.db'), mode='demo', password=PASSWORD, session_secret=SECRET,
                     toss_id='', toss_secret='', gemini_key='')
     with TestClient(create_app(config, background=False, test=True)) as client:
@@ -79,4 +79,4 @@ def test_new_experiments_default_to_the_research_filter(tmp_path):
         body = {'seed_krw': 1000000, 'seed_usd': 1000, 'name': 'x', 'strategy_mode': 'intraday', 'confirmation': '새 실험 시작'}
         assert client.post('/api/experiments', json=body, headers=ACTION).status_code == 200
         state = client.get('/api/state').json()
-        assert state['strategy_settings']['signal_filter'] == 'research' and state['verification']['signal_filter'] == 'research'
+        assert state['strategy_settings']['signal_filter'] == 'research_v2' and state['verification']['signal_filter'] == 'research_v2'   # 2026-10-07
