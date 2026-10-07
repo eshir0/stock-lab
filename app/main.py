@@ -336,7 +336,7 @@ def create_app(config=None, background=True, test=False):
         signal_filter: Literal['all', 'research'] = 'research'
         evidence: Literal['on', 'off'] = 'on'
         scan: Literal['focus', 'pool'] = 'pool'
-        exit_profile: Literal['ai', 'market'] = 'market'
+        exit_profile: Literal['ai', 'market', 'market_long'] = 'market_long'
         confirmation: str
 
     @app.post('/api/experiments')

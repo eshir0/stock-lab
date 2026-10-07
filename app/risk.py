@@ -20,8 +20,16 @@ HORIZONS = ('month', 'intraday')
 # How wide a month position's stop and target are. 'ai': the director chooses (2-15% stop, target >= 1.5x). 'market':
 # research_plan_market.json part B (2026-10-07) - US names get a server-set stop of 3x the daily range (ATR14, 2-15%) and a
 # target of 3x the stop (3-40%), so the trailing stop gives a trend room; Korean names stay with the director's choice.
-EXIT_PROFILES = ('ai', 'market')
+# 'market_long' (2026-10-07, research_plan_us_hold.json part A): the same US stops, and US positions may be held for 63
+# sessions (90 calendar days) instead of the experiment's 30 days - with stops this wide 62% of trades used to end at the limit.
+EXIT_PROFILES = ('ai', 'market', 'market_long')
 US_STOP_ATR, US_TAKE_STOP = 3.0, 3.0
+US_LONG_HOLD_MINUTES = 90*1440
+
+
+def wide_us(settings, market):
+    """True when this experiment sets US stops from the daily range (exit_profile 'market' or 'market_long')."""
+    return market == 'US' and (settings or {}).get('exit_profile') in ('market', 'market_long')
 
 
 def market_exit(market, atr_pct):
@@ -137,7 +145,7 @@ def normalize_settings(settings=None):
     scan = settings.get('scan', 'focus')                         # ... and only look at the daily focus list
     exit_profile = settings.get('exit_profile', 'ai')            # ... and let the AI choose every stop and target
     if exit_profile not in EXIT_PROFILES:
-        raise RiskError('손절·익절 폭 방식은 ai 또는 market이어야 합니다.')
+        raise RiskError('손절·익절 폭 방식은 ai, market, market_long 중 하나여야 합니다.')
     if scan not in ('focus', 'pool'):
         raise RiskError('후보 확인 범위는 focus 또는 pool이어야 합니다.')
     if use_evidence not in ('on', 'off'):
@@ -270,6 +278,8 @@ def size_order(state, symbol, quote, decision, constraints, config, now=None):
     if not Decimal('0') < stop < entry < take:
         raise RiskError('손절·익절 가격이 유효한 간격을 만들지 못합니다.')
     until = now+min(int(holding), settings['max_holding_minutes'])*60
+    if settings.get('exit_profile') == 'market_long' and instrument['market'] == 'US' and settings['horizon'] == 'month':
+        until = now+US_LONG_HOLD_MINUTES*60            # a US trend gets 63 sessions; the trailing stop usually ends it first
     # A month position is held overnight; only the older same-session mode has to be closed before the session ends.
     expiry = until if settings['horizon'] == 'month' else min(float(session_end)-120, until)
     result.update(stop_price=float(stop), take_profit_price=float(take), expires_at=expiry)

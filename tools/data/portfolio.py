@@ -47,7 +47,8 @@ def load(path, market, params):
     return pd.DataFrame({k: np.asarray(v) for k, v in cols.items()}, index=dates)   # positional: the frames above have a range index
 
 
-def run(market, symbols, params, start, end):
+def run(market, symbols, params, start, end, allowed=None):
+    """`allowed` (month 'YYYY-MM' -> set of symbols): a point-in-time universe; new buys only in that month's list."""
     data = {}
     for s in symbols:
         folder = 'US' if market == 'US' else 'KR'
@@ -103,7 +104,7 @@ def run(market, symbols, params, start, end):
             if day not in d.index:
                 continue
             p, row = pos[s], d.loc[day]
-            price = None
+            price, kind = None, 'stop'
             if row['open'] <= p['stop']:
                 price = row['open']
             elif row['low'] <= p['stop']:
@@ -114,13 +115,13 @@ def run(market, symbols, params, start, end):
                     p['stop'] = max(p['stop'], p['entry']*1.003, p['high']*(1-p['trail']))
                 p['left'] -= 1
                 if p['left'] <= 0:
-                    price = row['close']
+                    price, kind = row['close'], 'time'
             if price is not None:
                 sell = price*(1-k['slip']/1e4)
                 gross = p['qty']*sell
                 fee = gross*(k['fee']+(0 if etf[s] else k['tax']))/1e4
                 cash += gross-fee
-                trades.append((s, p['day'], day, (gross-fee)/(p['cost']*(1+k['fee']/1e4))-1))
+                trades.append((s, p['day'], day, (gross-fee)/(p['cost']*(1+k['fee']/1e4))-1, kind))
                 del pos[s]
         for s, d in data.items():
             if day in d.index:
@@ -132,7 +133,9 @@ def run(market, symbols, params, start, end):
                 for s in list(pos):
                     cash += sell_all(s, last.get(s, pos[s]['entry']), pos, trades, day, k, etf)
         # 3) today's signals, best traded value first
+        month = allowed.get(day[:7], set()) if allowed is not None else None
         cands = [(data[s].loc[day, 'value'], s) for s in data if s not in pos and day in data[s].index
+                 and (month is None or s in month)
                  and data[s].loc[day, 'buy'] and np.isfinite(data[s].loc[day, 'atr'])]
         pending = {} if halted else {s: data[s].loc[day, 'atr'] for _, s in sorted(cands, reverse=True)}
         eq = cash+sum(p['qty']*last.get(x, p['entry']) for x, p in pos.items())
@@ -154,6 +157,7 @@ def run(market, symbols, params, start, end):
             'skipped_zero_size': skipped, 'mar': round(((curve.iloc[-1]/SEED[market])**(1/years)-1)*100/abs(dd), 3) if dd else None,
             'win_pct': round(float(np.mean([r > 0 for r in rets])*100), 1) if rets else None,
             'avg_trade_pct': round(float(np.mean(rets)*100), 3) if rets else None,
+            'time_exit_pct': round(float(np.mean([len(t) > 4 and t[4] == 'time' for t in trades])*100), 1) if trades else None,
             'worst_year_pct': round(float(curve.groupby(curve.index.str[:4]).apply(lambda x: x.iloc[-1]/x.iloc[0]-1).min()*100), 1)}
 
 
@@ -168,6 +172,38 @@ def sell_all(s, price, pos, trades, day, k, etf):
     fee = gross*(k['fee']+(0 if etf[s] else k['tax']))/1e4
     trades.append((s, p['day'], day, (gross-fee)/(p['cost']*(1+k['fee']/1e4))-1))
     return gross-fee
+
+
+LEVERAGED = r'(?i)\b(2x|3x|-1x|-2x|-3x|1\.5x|ultra|ultrapro|leveraged|inverse|short|bear|bull|daily|vix|volatility)\b'
+
+
+def pit_lists(size, start, end):
+    """{month: set of yahoo symbols}: at each month's first session, the `size` US names with the highest median daily
+    traded value over the previous 60 sessions, from data known before that session (part B of research_plan_us_hold)."""
+    import re
+    names = pd.read_parquet(DATA/'universe'/'us.parquet').set_index('yahoo')['name'].to_dict()
+    cal = pd.read_parquet(DATA/'daily'/'US'/'SPY.parquet')['date'].astype(str)
+    cal = cal[(cal >= start) & (cal <= end)]
+    firsts = cal.groupby(cal.str[:7]).min()                    # month -> first session
+    scores = {m: [] for m in firsts.index}
+    for path in (DATA/'daily'/'US').glob('*.parquet'):
+        y = path.stem
+        if re.search(LEVERAGED, str(names.get(y, ''))):
+            continue
+        try:
+            df = pd.read_parquet(path, columns=['date', 'close', 'volume'])
+        except Exception:
+            continue
+        if len(df) < 80:
+            continue
+        df['date'] = df['date'].astype(str)
+        value = (df['close']*df['volume']).rolling(60, min_periods=40).median().shift(1)   # known before the session
+        value.index = df['date']
+        for m, d in firsts.items():
+            v = value.get(d)
+            if v is not None and np.isfinite(v) and v > 0:
+                scores[m].append((v, y))
+    return {m: {y for _, y in sorted(rows, reverse=True)[:size]} for m, rows in scores.items()}
 
 
 def main():
@@ -190,9 +226,17 @@ def main():
             if kr_etf.get(s):
                 ETFS.add(y)
     out = {'params': params}
+    markets = tuple(params.get('markets') or ('KR', 'US'))
+    allowed = None
+    if params.get('pool') == 'pit':
+        allowed = pit_lists(int(params.get('pit_size', 17)), '2006-01-01', '2026-12-31')
+        us = pd.read_parquet(DATA/'universe'/'us.parquet').set_index('yahoo')['etf'].to_dict()
+        pools['US'] = sorted(set().union(*allowed.values()))
+        ETFS.update(y for y in pools['US'] if us.get(y))
+        out['pit_names'] = len(pools['US'])
     for label, (a, b) in {'all': ('2006-01-01', '2026-12-31'), 'develop': ('2006-01-01', '2018-12-31'),
                           'holdout': ('2019-01-01', '2026-12-31')}.items():
-        out[label] = {m: run(m, pools[m], params, a, b) for m in ('KR', 'US')}
+        out[label] = {m: run(m, pools[m], params, a, b, allowed if m == 'US' else None) for m in markets}
     name = os.environ.get('TAG', 'base')
     (DATA/'results'/f'portfolio-{name}.json').write_text(json.dumps(out, ensure_ascii=False, indent=1))
     print(json.dumps(out, ensure_ascii=False, indent=1))

@@ -171,7 +171,7 @@ $('experiment-open').onclick = () => {
   $('strategy-mode').value = 'intraday';
   $('include-leveraged-etfs').checked = false;
   $('exit-mode').value = 'trail';
-  $('exit-profile').value = 'market';
+  $('exit-profile').value = 'market_long';
   $('signal-filter').value = 'research';
   $('evidence-mode').value = 'on';
   $('scan-mode').value = 'pool';
@@ -288,7 +288,7 @@ function renderPerformance(s, c, id) {
 function renderStrategy(s) {
   const intraday = s.strategy_mode === 'intraday', settings = s.strategy_settings || {}, risk = s.risk_status, month = intraday && settings.horizon === 'month';
   $('strategy-label').textContent = intraday ? (month ? '전문가팀 · 1개월 스윙' : '전문가팀 · 당일 단타(제거된 방식)') : '기본 분석 · 기존 방식';
-  $('strategy-description').textContent = intraday ? `손절 위험 ${plainPercent(settings.risk_per_trade_pct)} · 일중 손실 한도 ${plainPercent(settings.daily_loss_limit_pct)} · 최대 보유 ${holdText(settings.max_holding_minutes)} · 종목당 최대 ${plainPercent(settings.max_position_pct ?? 30)} · ${settings.include_leveraged_etfs ? '레버리지·인버스 ETF 포함' : '레버리지 ETF 제외'} · ${settings.exit_profile === 'market' ? '미국 손절 변동폭 3배 · ' : ''}${settings.scan === 'pool' ? '후보 전체 규칙 확인' : settings.universe_mode === 'fixed' ? '고정 종목' : '일일 집중 종목'}${month ? ' · 규칙 신호가 있을 때만 AI 분석' : ''}` : '현재 실험의 기존 분석 방식을 유지합니다. 전문가팀 전략은 새 실험에서 선택할 수 있습니다.';
+  $('strategy-description').textContent = intraday ? `손절 위험 ${plainPercent(settings.risk_per_trade_pct)} · 일중 손실 한도 ${plainPercent(settings.daily_loss_limit_pct)} · 최대 보유 ${holdText(settings.max_holding_minutes)} · 종목당 최대 ${plainPercent(settings.max_position_pct ?? 30)} · ${settings.include_leveraged_etfs ? '레버리지·인버스 ETF 포함' : '레버리지 ETF 제외'} · ${settings.exit_profile === 'market_long' ? '미국 손절 변동폭 3배·최대 90일 · ' : settings.exit_profile === 'market' ? '미국 손절 변동폭 3배 · ' : ''}${settings.scan === 'pool' ? '후보 전체 규칙 확인' : settings.universe_mode === 'fixed' ? '고정 종목' : '일일 집중 종목'}${month ? ' · 규칙 신호가 있을 때만 AI 분석' : ''}` : '현재 실험의 기존 분석 방식을 유지합니다. 전문가팀 전략은 새 실험에서 선택할 수 있습니다.';
   $('risk-status').hidden = !intraday || !risk;
   if (intraday && risk) {
     const currencies = Array.isArray(risk.halted_currencies) ? risk.halted_currencies : [];

@@ -38,3 +38,22 @@ def test_a_us_buy_uses_the_wide_stop_and_a_korean_buy_does_not(desk):
     assert all('stop_rule' not in ctx['constraints'] for ctx in director if ctx['symbol'] == '005930')
     if '005930' in state['positions']:
         assert state['positions']['005930']['trail_pct'] != market_exit('US', history.summary(history.completed_bars(kr)).get('atr_pct'))[0]
+
+
+def test_market_long_holds_us_names_for_ninety_days_and_korean_names_as_before(desk):
+    """research_plan_us_hold.json part A (2026-10-07): with stops this wide 62% of trades ended at the 21-session limit;
+    63 sessions passed the pre-registered test, so 'market_long' gives US names 90 calendar days."""
+    import time
+    from app.risk import US_LONG_HOLD_MINUTES
+    assert normalize_settings({'horizon': 'month', 'exit_profile': 'market_long'})['exit_profile'] == 'market_long'
+    with desk.store.edit() as s:
+        s['strategy_settings']['exit_profile'] = 'market_long'
+    desk.provider.daily['AAPL'], desk.provider.daily['005930'] = bars(series(200, 'up')), bars(series(70000, 'up'))
+    state = run_cycle(desk)
+    state = run_cycle(desk) if 'AAPL' not in state['positions'] else state
+    us = state['positions']['AAPL']
+    assert us['expires_at']-time.time() == pytest.approx(US_LONG_HOLD_MINUTES*60, abs=600)
+    if '005930' in state['positions']:
+        assert state['positions']['005930']['expires_at']-time.time() <= 30*86400+600
+    director = [ctx for role, ctx in desk.contexts if role == 'director' and ctx['symbol'] == 'AAPL']
+    assert director and 'holding_rule' in director[-1]['constraints'] and 'stop_rule' in director[-1]['constraints']

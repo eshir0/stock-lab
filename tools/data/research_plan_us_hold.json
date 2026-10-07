@@ -1,0 +1,18 @@
+{
+  "registered": "2026-10-07 (KST), before any of these runs",
+  "purpose": "Two open points of the US wide-stop rule adopted earlier today (research_plan_market.json part B): (A) with stops this wide, more trades end at the holding limit - should US positions be held longer? (B) the site's 17 US names are today's large caps, so the earlier portfolio numbers carry hindsight - how much, and does the wide stop still win without it?",
+  "setup": "portfolio.py: daily account simulation, research signal filter, exit C (trailing stop, no sale at the target), real costs, risk 0.5% per trade, 30% per name, USD 750, fractional shares. Develop 2006-2018, holdout 2019-2026.",
+  "part_A_holding_limit": {
+    "variants": {"H21": "stop 3.0x ATR, take 3.0x stop, hold 21 sessions (adopted today)", "H42": "same, hold 42", "H63": "same, hold 63"},
+    "universe": "the site's 17 US names (as the adopted rule was tested)",
+    "measure": "CAGR, max drawdown, MAR (CAGR / |max drawdown|), trades, and the share of trades that ended at the holding limit",
+    "adopt": "A longer hold replaces H21 for US names only if, against H21, its develop CAGR AND develop MAR are higher, its holdout CAGR AND holdout MAR are at least H21's, and its max drawdown stays shallower than the S&P 500 ETF in both periods. If both H42 and H63 pass, the one with the higher develop MAR. Otherwise H21 stays."
+  },
+  "part_B_hindsight": {
+    "universe": "point in time: at the first session of each month, the 17 US names (stocks and ETFs, leveraged/inverse/volatility products excluded by name) with the highest median daily traded value over the previous 60 sessions, using only data up to then. New buys only in that month's list; open positions run to their exit.",
+    "runs": {"PIT-base": "stop 1.5x ATR, take 1.5x stop, hold 21 (the old rule)", "PIT-wide": "the adopted wide stop (or the part A winner)"},
+    "measure": "the same numbers as part A; hindsight effect = site-list result minus point-in-time result for the same rule",
+    "use": "No adoption. If PIT-wide is NOT better than PIT-base in both periods, the wide-stop adoption is reported as possibly a hindsight artefact and reconsidered. Survivorship stays: the archive holds only US names listed today (delisted US names have no free price history), stated in the report."
+  },
+  "after": "Anything adopted becomes a setting of new experiments only."
+}

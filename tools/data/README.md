@@ -43,6 +43,8 @@ flowchart LR
 
 - `research_daytrade.py` + `research_plan_market.json` (2026-10-07): 국내 단타 6가지를 시간봉으로 검증(채택 없음)하고, 미국 넓은 손절(3×ATR)을 포트폴리오로 확인(채택)한 사전 등록 연구.
 
+- `research_plan_us_hold.json` + `portfolio.py`의 `hold`·`pool=pit` (2026-10-07): 미국 넓은 손절의 최대 보유 21/42/63거래일 비교(63 채택)와, 매달 그 당시 거래대금 상위 17종목으로 다시 계산한 사후 선택 측정(전략이 S&P 500보다 낮음).
+
 ## 📁 폴더 구조
 
 ```
