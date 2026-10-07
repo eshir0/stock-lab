@@ -575,7 +575,7 @@ function renderPoolBoard(s) {
   $('pool-count').textContent = `신호 ${fired}개 · ${rows.length}종목 · ${clock(pb.time)} 확인`;
   const body = items.map(({row, live, livePrice, best, blocked}) => {
     const st = row.held ? 'held' : blocked ? 'blocked' : best ? best.state : 'off';
-    const label = row.held ? '보유 중 · 청산 규칙이 관리' : blocked ? '이 원금으로는 살 수 없음' : !best ? '쓸 수 있는 신호 없음' : best.state === 'met' ? '신호 켜짐 · AI 분석 대상' : best.state === 'now' ? '지금 가격이면 켜짐' : best.state === 'near' ? '근접 (3% 이내)' : '멂';
+    const label = row.held ? '보유 중 · 청산 규칙이 관리' : blocked ? (/위험 한도/.test(row.unaffordable) ? '위험 한도 초과 · 매수 제외' : '원금 부족 · 매수 제외') : !best ? '쓸 수 있는 신호 없음' : best.state === 'met' ? '신호 켜짐 · AI 분석 대상' : best.state === 'now' ? '지금 가격이면 켜짐' : best.state === 'near' ? '근접 (3% 이내)' : '멂';
     const rule = row.held || !best ? '—' : `${ruleLabels[best.r.rule]}${best.r.higher ? ' ↑' : ' ↓'}`;
     const dist = row.held || !best ? '—' : best.state === 'met' ? '충족' : finite(best.dist) ? `${number(best.r.trigger, row.currency)} (${best.dist > 0 ? '+' : ''}${best.dist.toFixed(1)}%)` : '—';
     return `<tr class="pb-row ${st}"><td><span class="pb-mkt">${row.market === 'KR' ? '국내' : '미국'}</span></td><td><b>${esc(row.name)}</b><small class="muted"> ${esc(row.symbol)}</small></td><td>${number(live, row.currency)}${livePrice ? '' : '<small class="muted"> 종가</small>'}</td><td>${rule}</td><td>${dist}</td><td><span class="pb-state ${st}"${blocked ? ` title="${esc(row.unaffordable)}"` : ''}>${label}</span>${blocked ? `<small class="pb-why muted">${esc(row.unaffordable)}</small>` : ''}</td></tr>`;

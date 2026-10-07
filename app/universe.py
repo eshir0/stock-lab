@@ -173,7 +173,7 @@ def unaffordable(m, item, budget, risk=None):
     if allowed is not None and m.get('last'):
         one_share = m['last']*max(.02, (m.get('atr_pct') or 0)/100)
         if one_share > allowed:
-            return [f'1주만 사도 손절 시 손실 {show(one_share)}이 거래당 위험 한도 {show(allowed)}를 넘어 이 원금으로는 살 수 없음']
+            return [f'현금은 충분하지만, 1주만 사도 손절 시 손실 {show(one_share)}이 한 번 매매에 허용한 손실(거래당 위험 한도) {show(allowed)}를 넘어 매수하지 않음']
     return []
 
 
