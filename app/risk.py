@@ -17,6 +17,19 @@ UNIVERSE_MODES = ('daily_focus', 'fixed')
 # 'month': positions are planned for up to a month, are held overnight and are protected by a trailing stop.
 # 'intraday': the older same-session mode (it is also what a saved experiment without a horizon means).
 HORIZONS = ('month', 'intraday')
+# How wide a month position's stop and target are. 'ai': the director chooses (2-15% stop, target >= 1.5x). 'market':
+# research_plan_market.json part B (2026-10-07) - US names get a server-set stop of 3x the daily range (ATR14, 2-15%) and a
+# target of 3x the stop (3-40%), so the trailing stop gives a trend room; Korean names stay with the director's choice.
+EXIT_PROFILES = ('ai', 'market')
+US_STOP_ATR, US_TAKE_STOP = 3.0, 3.0
+
+
+def market_exit(market, atr_pct):
+    """(stop %, target %) the 'market' profile sets for a name, or None when the director's own numbers stand."""
+    if market != 'US' or not isinstance(atr_pct, (int, float)) or not math.isfinite(atr_pct) or atr_pct <= 0:
+        return None
+    stop = round(min(max(US_STOP_ATR*atr_pct, 2.0), 15.0), 2)
+    return stop, round(min(max(US_TAKE_STOP*stop, 3.0), 40.0), 2)
 MONTH_MINUTES = 30*24*60
 # One place for every number that depends on the horizon: the AI's plan is validated and sized against these.
 BOUNDS = {
@@ -122,6 +135,9 @@ def normalize_settings(settings=None):
     signal_filter = settings.get('signal_filter', 'all')       # saved experiments act on every rule, as they started
     use_evidence = settings.get('evidence', 'off')              # ... and analyse without the archive's evidence packs
     scan = settings.get('scan', 'focus')                         # ... and only look at the daily focus list
+    exit_profile = settings.get('exit_profile', 'ai')            # ... and let the AI choose every stop and target
+    if exit_profile not in EXIT_PROFILES:
+        raise RiskError('손절·익절 폭 방식은 ai 또는 market이어야 합니다.')
     if scan not in ('focus', 'pool'):
         raise RiskError('후보 확인 범위는 focus 또는 pool이어야 합니다.')
     if use_evidence not in ('on', 'off'):
@@ -132,7 +148,8 @@ def normalize_settings(settings=None):
         raise RiskError('익절 방식은 target 또는 trail이어야 합니다.')
     return {'include_leveraged_etfs': leveraged, 'universe_mode': universe, 'horizon': horizon,
             'risk_per_trade_pct': float(risk), 'daily_loss_limit_pct': float(daily), 'max_holding_minutes': int(holding),
-            'max_position_pct': shares.number(position), 'exit_mode': exit_mode, 'signal_filter': signal_filter, 'evidence': use_evidence, 'scan': scan}
+            'max_position_pct': shares.number(position), 'exit_mode': exit_mode, 'signal_filter': signal_filter, 'evidence': use_evidence, 'scan': scan,
+            'exit_profile': exit_profile}
 
 
 def _instrument(symbol):

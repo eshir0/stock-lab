@@ -140,4 +140,4 @@ def judge(state, *, tracking, report, evaluation, config, now):
             'checks': checks, 'strategy_changed': changed, 'version': plan.get('version'),
             'ai_vs_rule': scored.get('ai_vs_rule'), 'exit_mode': plan.get('exit_mode', 'target'),
             'signal_filter': plan.get('signal_filter', 'all'), 'evidence': plan.get('evidence', 'off'), 'scan': plan.get('scan', 'focus'),
-            'official': plan.get('official')}
+            'exit_profile': plan.get('exit_profile', 'ai'), 'official': plan.get('official')}

@@ -187,6 +187,7 @@ class Engine(DeskMixin, FocusMixin):
                 s['verification']['signal_filter'] = (s.get('strategy_settings') or {}).get('signal_filter', 'all')
                 s['verification']['evidence'] = (s.get('strategy_settings') or {}).get('evidence', 'off')
                 s['verification']['scan'] = (s.get('strategy_settings') or {}).get('scan', 'focus')
+                s['verification']['exit_profile'] = (s.get('strategy_settings') or {}).get('exit_profile', 'ai')
         return result
 
     def fractional(self, currency):
@@ -231,7 +232,10 @@ class Engine(DeskMixin, FocusMixin):
                 'leveraged_etfs': s.get('strategy_settings', {}).get('include_leveraged_etfs', False),
                 **({'exit_rule': '이 실험은 익절가에 도달해도 팔지 않습니다. 익절가는 손익비 검증과 추적 손절 시작 기준(목표의 절반에서 손절가를 '
                                  '올리기 시작)으로만 쓰이고, 이후 최고가에서 손절 폭만큼 떨어지면 팔거나 보유 기한에 청산합니다.'}
-                   if (s.get('strategy_settings') or {}).get('exit_mode') == 'trail' else {})}
+                   if (s.get('strategy_settings') or {}).get('exit_mode') == 'trail' else {}),
+                **({'stop_rule': '이 실험의 미국 종목은 서버가 손절 폭을 하루 변동폭(atr_pct)의 3배(2~15%), 익절 기준을 손절 폭의 3배로 정합니다. '
+                                 'stop_loss_pct·take_profit_pct는 형식대로 채우되 이 값으로 바뀝니다. 손절이 넓은 만큼 수량은 위험 한도에 맞춰 줄어듭니다.'}
+                   if (s.get('strategy_settings') or {}).get('exit_profile') == 'market' and SYMBOLS[symbol]['market'] == 'US' else {})}
 
     def risk_budget(self, state):
         """Whole-share currencies -> the most one trade may lose at its stop (equity x the experiment's risk per trade), for

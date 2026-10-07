@@ -16,7 +16,7 @@ from .live.shadow import record_shadow
 from .rules import RULE_NAMES, board, signals
 from .performance import performance_summary
 from .providers import ProviderError
-from .risk import RiskError, horizon_of, is_etf, min_take_pct, round_trip_cost_pct, size_order, trailed_stop
+from .risk import RiskError, horizon_of, is_etf, market_exit, min_take_pct, round_trip_cost_pct, size_order, trailed_stop
 from .store import event
 from .universe import ROTATION_WARMUP
 
@@ -896,6 +896,12 @@ class DeskMixin:
         context['reports'].append(critic)
         save_reports([critic], 'director')
         decision = research('director', context)
+        if month and (account.get('strategy_settings') or {}).get('exit_profile') == 'market':
+            # Before the order and before any conditional entry is stored, so both use the same stop and target.
+            fixed = market_exit(SYMBOLS[symbol]['market'], history.summary(bars.get(symbol) or []).get('atr_pct'))
+            if fixed and decision.get('stance') in ('BUY', 'HOLD'):
+                decision['ai_stop_take'] = [decision.get('stop_loss_pct'), decision.get('take_profit_pct')]
+                decision['stop_loss_pct'], decision['take_profit_pct'] = fixed
         context['reports'].append(decision)
         save_reports([decision], None)
         usage_after = self.window_usage()[1]

@@ -1,0 +1,24 @@
+{
+  "registered": "2026-10-07 (KST), before any of these variants was run",
+  "purpose": "The user proposed market-specific styles: day trading for Korea (a market with a strong day-trading culture and a small account) and longer holding for the US. Test both on the archive before anything changes on the site.",
+  "part_A_korea_day_trading": {
+    "data": "Yahoo hourly bars 2023-10 .. 2026-10 of the ~600 most traded Korean names (stocks and ETFs). Bars: 09:00 (open auction), 10:00, ..., 15:00 (includes the close auction).",
+    "split": {"first_half": ["2023-10-01", "2025-03-31"], "second_half": ["2025-04-01", "2026-12-31"]},
+    "costs": "Real site costs per round trip: stocks 0.33% (fee 0.015% x2, sell tax 0.20%, slippage 0.05% x2), ETFs 0.13% (no tax). Every position is closed by the 15:00 bar's close (no overnight).",
+    "variants": {
+      "D0": "every day, buy at the open, sell at the close (the base rate of holding a Korean name for one session)",
+      "D1": "gap up >= 2% at the open: buy at the 10:00 bar's open (after the first hour), sell at the close (momentum continuation)",
+      "D2": "first hour up >= 1% with first-hour volume >= 1.5x its 20-day average first hour: buy at the 10:00 bar's open, sell at the close",
+      "D3": "gap down <= -2% at the open: buy at the open, sell at the close (opening reversal)",
+      "D4": "the site's daily rule signal (any of the four, as of the previous close): buy at the open, sell at the close",
+      "D5": "opening range breakout: after the first hour, buy when a later hour trades above the first hour's high (filled at that high), stop at the first hour's low, otherwise sell at the close"
+    },
+    "adopt": "A variant may become the Korean style only if, for Korean STOCKS (the site trades stocks there), its mean per trade after costs is > 0 AND the 95% interval (trades in the same month counted as one draw) is entirely above 0 in BOTH halves, with at least 300 trades in each half. If none passes, Korea keeps the swing style and the report says so."
+  },
+  "part_B_us_longer_holding": {
+    "data": "research.json (registered 2026-10-03): the stop/take/hold grid already run on 2006-2018 (develop) and 2019-2026 (holdout).",
+    "candidates": "stop 2.0x or 3.0x ATR with take 1.5x/2.0x/3.0x, hold 21; and hold 42/63 with the base stop",
+    "adopt": "For US stocks AND US ETFs: the candidate with the best develop mean replaces the base only if its holdout mean is also above the base in both groups. A portfolio check (portfolio.py, the site's 17 US names, 750 USD) must then show a max drawdown no deeper than holding the S&P 500 ETF over the same period; otherwise the next best passing candidate is tried, and if none passes the US keeps the base."
+  },
+  "after": "Anything adopted is a strategy change: it becomes a setting of NEW experiments only; the running experiment is not changed."
+}

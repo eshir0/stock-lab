@@ -171,6 +171,7 @@ $('experiment-open').onclick = () => {
   $('strategy-mode').value = 'intraday';
   $('include-leveraged-etfs').checked = false;
   $('exit-mode').value = 'trail';
+  $('exit-profile').value = 'market';
   $('signal-filter').value = 'research';
   $('evidence-mode').value = 'on';
   $('scan-mode').value = 'pool';
@@ -209,7 +210,7 @@ $('experiment-form').addEventListener('submit', async e => {
   const seed_krw = Number($('seed-krw').value), seed_usd = Number($('seed-usd').value), max_order_pct = Number($('max-order-pct').value), max_position_pct = Number($('max-position-pct').value);
   const strategy_mode = $('strategy-mode').value;
   const horizon = $('horizon').value, span = horizons[horizon] || horizons.month, holdingInput = Number($('max-holding').value);
-  const settings = {include_leveraged_etfs:$('include-leveraged-etfs').checked,risk_per_trade_pct:Number($('risk-per-trade').value),daily_loss_limit_pct:Number($('daily-loss-limit').value),horizon,max_holding_minutes:holdingInput * span.unit,exit_mode:$('exit-mode').value,signal_filter:$('signal-filter').value,evidence:$('evidence-mode').value,scan:$('scan-mode').value};
+  const settings = {include_leveraged_etfs:$('include-leveraged-etfs').checked,risk_per_trade_pct:Number($('risk-per-trade').value),daily_loss_limit_pct:Number($('daily-loss-limit').value),horizon,max_holding_minutes:holdingInput * span.unit,exit_mode:$('exit-mode').value,exit_profile:$('exit-profile').value,signal_filter:$('signal-filter').value,evidence:$('evidence-mode').value,scan:$('scan-mode').value};
   if (!name || ![seed_krw,seed_usd,max_order_pct].every(Number.isFinite) || seed_krw < 0 || seed_usd < 0 || seed_krw + seed_usd <= 0 || max_order_pct < 1 || max_order_pct > 100 || !Number.isFinite(max_position_pct) || max_position_pct < 10 || max_position_pct > 100) {
     $('experiment-error').textContent = '실험 이름과 원금을 확인해 주세요. 최소 한 통화의 원금은 0보다 커야 하고, 1회 매수 한도는 1~100%, 종목당 최대 비중은 10~100%입니다.';
     return;
@@ -287,7 +288,7 @@ function renderPerformance(s, c, id) {
 function renderStrategy(s) {
   const intraday = s.strategy_mode === 'intraday', settings = s.strategy_settings || {}, risk = s.risk_status, month = intraday && settings.horizon === 'month';
   $('strategy-label').textContent = intraday ? (month ? '전문가팀 · 1개월 스윙' : '전문가팀 · 당일 단타(제거된 방식)') : '기본 분석 · 기존 방식';
-  $('strategy-description').textContent = intraday ? `손절 위험 ${plainPercent(settings.risk_per_trade_pct)} · 일중 손실 한도 ${plainPercent(settings.daily_loss_limit_pct)} · 최대 보유 ${holdText(settings.max_holding_minutes)} · 종목당 최대 ${plainPercent(settings.max_position_pct ?? 30)} · ${settings.include_leveraged_etfs ? '레버리지·인버스 ETF 포함' : '레버리지 ETF 제외'} · ${settings.scan === 'pool' ? '후보 전체 규칙 확인' : settings.universe_mode === 'fixed' ? '고정 종목' : '일일 집중 종목'}${month ? ' · 규칙 신호가 있을 때만 AI 분석' : ''}` : '현재 실험의 기존 분석 방식을 유지합니다. 전문가팀 전략은 새 실험에서 선택할 수 있습니다.';
+  $('strategy-description').textContent = intraday ? `손절 위험 ${plainPercent(settings.risk_per_trade_pct)} · 일중 손실 한도 ${plainPercent(settings.daily_loss_limit_pct)} · 최대 보유 ${holdText(settings.max_holding_minutes)} · 종목당 최대 ${plainPercent(settings.max_position_pct ?? 30)} · ${settings.include_leveraged_etfs ? '레버리지·인버스 ETF 포함' : '레버리지 ETF 제외'} · ${settings.exit_profile === 'market' ? '미국 손절 변동폭 3배 · ' : ''}${settings.scan === 'pool' ? '후보 전체 규칙 확인' : settings.universe_mode === 'fixed' ? '고정 종목' : '일일 집중 종목'}${month ? ' · 규칙 신호가 있을 때만 AI 분석' : ''}` : '현재 실험의 기존 분석 방식을 유지합니다. 전문가팀 전략은 새 실험에서 선택할 수 있습니다.';
   $('risk-status').hidden = !intraday || !risk;
   if (intraday && risk) {
     const currencies = Array.isArray(risk.halted_currencies) ? risk.halted_currencies : [];
