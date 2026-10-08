@@ -66,6 +66,7 @@ def clock(timestamp):
     return datetime.fromtimestamp(timestamp, ZoneInfo('Asia/Seoul')).strftime('%H:%M')
 
 
+OPEN_BARS = 1          # completed minute candles needed for an analysis in the session's first 20 minutes
 GAP_MIN_PCT = .3       # a stop exit this far below the stop price was crossed by a gap, not touched
 
 
@@ -119,8 +120,25 @@ class DeskMixin:
         provider, pct, resets = self.window_usage()
         interval = pacing.pace(base, pct=pct, switch_pct=self.c.ai_switch_pct, resets_at=resets, until=until, now=now,
                                cost=cost, cap=self.c.pace_max_seconds)
+        backup = self.backup_with_room(provider)
+        if backup and interval > base:
+            # Another AI with room takes over at the switch level (usage.py), so the first one need not be spared: the
+            # analysis keeps its usual interval (2026-10-08: Claude at 21% stretched it to 59 minutes while Codex was at 0%).
+            info.update(pct=pct, resets_at=resets, provider=provider, backup=backup)
+            return base, info
         info.update(interval=interval, paced=interval > base, pct=pct, resets_at=resets, provider=provider)
         return interval, info
+
+    def backup_with_room(self, provider):
+        """The first other usable AI whose busiest window is under half of the switch level, or None."""
+        gate = self.agents.gate
+        if not gate.enabled:
+            return None
+        usable, statuses, _ = gate.plan()
+        for status in statuses:
+            if status['name'] != provider and status['name'] in usable and (status['pct'] or 0) < self.c.ai_switch_pct/2:
+                return status['name']
+        return None
 
     def analysis_interval(self, state):
         idle, busy = self.interval_plan(state)
@@ -561,11 +579,14 @@ class DeskMixin:
 
     @staticmethod
     def usable_candles(candles, quote, now):
-        """(this session's completed 1-minute candles, '') or (None, why not): at least 20, the newest under 3 minutes old and
-        no gap over 3 minutes among the last 20."""
+        """(this session's completed 1-minute candles, '') or (None, why not): the newest under 3 minutes old and no gap over
+        3 minutes among the last 20. Right after the open one completed candle is enough, so the first analysis runs at the
+        open instead of 20 minutes later (2026-10-08: a month plan reads the daily history; the minutes only time the entry).
+        Later in the session 20 are asked for, as before."""
         rows = [x for x in candles if x.get('completed') and quote['session_start'] <= x['time'] < now]
-        if len(rows) < 20 or now-rows[-1]['time'] > 180:
-            return None, '당일 완료된 1분봉 20개와 최신 봉을 기다립니다. AI를 호출하지 않습니다.'
+        needed = OPEN_BARS if now-quote['session_start'] < 20*60 else 20
+        if len(rows) < needed or now-rows[-1]['time'] > 180:
+            return None, (f'당일 완료된 1분봉 {needed}개와 최신 봉을 기다립니다. AI를 호출하지 않습니다.')
         if any(b['time']-a['time'] > 180 for a, b in zip(rows[-20:], rows[-19:])):
             return None, '분봉에 큰 공백이 있어 단기 분석을 보류합니다.'
         return rows, ''

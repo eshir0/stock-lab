@@ -632,3 +632,15 @@ def test_the_evaluation_summary_copes_with_a_conditional_entry(day):
     evaluation = day.public_state()['evaluation']
     assert evaluation['decisions'] == 2 and evaluation['counts']['BUY'] == 1 and evaluation['counts']['HOLD'] == 1
     assert 'pending' in evaluation and evaluation['engines']
+
+
+def test_right_after_the_open_one_completed_candle_is_enough():
+    """2026-10-08: the first analysis of a session used to wait 20 minutes for 20 minute-candles; a month plan reads the
+    daily history, so after the open one completed candle (the opening auction's minute) is enough."""
+    now = 1_000_000.0
+    opened = {'session_start': now-150}                                   # two and a half minutes into the session
+    usable, problem = DeskMixin.usable_candles(rows(2, now-30), opened, now)
+    assert problem == '' and len(usable) == 2
+    assert '1분봉 1개' in DeskMixin.usable_candles([], opened, now)[1]      # the opening minute is not complete yet
+    later = {'session_start': now-30*60}                                  # after 20 minutes the old rule applies again
+    assert '1분봉 20개' in DeskMixin.usable_candles(rows(5, now-30), later, now)[1]

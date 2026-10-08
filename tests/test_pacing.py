@@ -208,3 +208,22 @@ def test_the_dashboard_state_carries_the_pacing_numbers(desk):
 def test_the_defaults_are_on_and_capped_at_seventy_five_minutes():
     c = Config()
     assert c.quota_pacing is True and c.pace_max_seconds == 4500
+
+
+def test_a_backup_ai_with_room_keeps_the_usual_interval(desk):
+    """2026-10-08: Claude at 21% stretched the interval to 59 minutes while Codex sat at 0%. At the switch level the next AI
+    takes over, so with a backup that has room the analysis keeps its 20 minutes."""
+    now = time.time()
+    desk.readings = {'claude': {'limits': reading(.20, .10, now=now, five_reset=now+2*HOUR)},
+                     'codex': {'limits': reading(.0, .09, now=now, five_reset=now+4*HOUR)}}
+    desk.agents.gate.cache = None
+    started = time.time()
+    state = run_cycle(desk)
+    assert not state['pacing']['paced'] and state['pacing']['backup'] == 'codex' and 1195 <= gap(state, started) <= 1215
+    desk.readings['codex'] = {'limits': reading(.60, .09, now=now, five_reset=now+4*HOUR)}           # the backup is busy too
+    desk.agents.gate.cache = None
+    with desk.store.edit() as s:
+        s['next_run'] = 0
+    started = time.time()
+    state = run_cycle(desk)
+    assert state['pacing']['paced'] and gap(state, started) > 1215
