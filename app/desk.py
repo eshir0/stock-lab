@@ -22,7 +22,20 @@ from .universe import ROTATION_WARMUP
 
 MARKET_LABELS = {'KR': '국내', 'US': '미국'}
 DESK_CALLS = len(DESK_ROLES)+1  # stock selection + six research roles
-DAILY_TTL = 20*60               # seconds a name's daily bars are reused (they only change once a day)
+DAILY_TTL = 6*3600              # longest reuse of a name's daily bars
+
+
+def daily_fresh(symbol, read_at, now):
+    """A daily-bar read is still current until the next local midnight of the name's market, when the provider marks the
+    previous session's bar complete (and may re-adjust for a dividend or split), and never longer than DAILY_TTL.
+    (2026-10-08: a 20-minute reuse made the 30-minute pool scan read all 32 names again each time; with the open's minute
+    candles on top, the chart group answered 429.)"""
+    if now-read_at >= DAILY_TTL or now < read_at:
+        return False
+    zone = ZoneInfo('Asia/Seoul' if SYMBOLS[symbol]['market'] == 'KR' else 'America/New_York')
+    day = datetime.fromtimestamp(read_at, zone).date()
+    boundary = datetime(day.year, day.month, day.day, tzinfo=zone).timestamp()+86400+120
+    return now < boundary
 
 
 def _pct(new, old):
@@ -72,10 +85,11 @@ GAP_MIN_PCT = .3       # a stop exit this far below the stop price was crossed b
 
 class DeskMixin:
     def daily_bars(self, symbol, now=None):
-        """Completed daily bars of the last ~3 months, reused for a while. Raises ProviderError when unreadable."""
+        """Completed daily bars of the last ~3 months, reused until a new bar can have completed. Raises ProviderError when
+        unreadable."""
         now = time.time() if now is None else now
         cached = self.daily_cache.get(symbol)
-        if cached and now-cached[0] < DAILY_TTL:
+        if cached and daily_fresh(symbol, cached[0], now):
             return cached[1]
         bars = history.completed_bars(self.provider.candles(symbol, '1d', history.FETCH_BARS), now)
         self.daily_cache[symbol] = (now, bars)
@@ -197,9 +211,13 @@ class DeskMixin:
             if skipped:
                 until = now+self.analysis_interval(snapshot)
                 s['next_run'] = until
-                s['scheduler_status'] = f'규칙 신호가 없어 AI를 호출하지 않았습니다 · {gate.summary_line(checks)} · 다음 확인 {clock(until)}'
+                # Say why: no signal at all, or signals that are waiting (analysed recently, filtered, held) - 2026-10-08 the
+                # line said "no signal" while 삼성바이오로직스 had one and was only resting after a recent analysis.
+                lead = ('규칙 신호가 없어' if all(c['reason'] == 'no_signal' for c in checks)
+                        else '지금 분석할 종목이 없어')
+                s['scheduler_status'] = f'{lead} AI를 호출하지 않았습니다 · {gate.summary_line(checks)} · 다음 확인 {clock(until)}'
                 if not previous.get('skipped'):
-                    event(s, '규칙 신호가 없어 AI 호출 없이 대기합니다: '+gate.summary_line(checks))
+                    event(s, f'{lead} AI 호출 없이 대기합니다: '+gate.summary_line(checks))
             elif previous.get('skipped'):
                 event(s, '규칙 신호가 나타나 AI 분석을 다시 시작합니다: '+gate.summary_line([c for c in checks if c['eligible']]))
         return eligible, verdicts, bars
@@ -776,6 +794,8 @@ class DeskMixin:
             candles, _ = self.usable_candles(self.provider.candles(symbol, interval='1m'), fresh, now)
             if candles is None:
                 problem = '1분봉을 확인하지 못해 돌파 거래량을 확인하는 중입니다.'
+            elif entry.volume_ratio(candles) is None:
+                problem = '돌파했지만 장 시작 직후라 거래량을 비교할 1분봉(25개)을 기다립니다.'
             elif not entry.volume_ok(candles):
                 problem = '돌파했지만 거래량이 받쳐주지 않아 기다립니다.'
         with self.store.edit() as s:

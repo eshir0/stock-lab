@@ -515,3 +515,18 @@ def test_an_order_waits_for_a_fresh_quote_and_gives_up_after_a_few_tries(desk, m
     monkeypatch.setattr(desk, 'quote_for_trade', lambda s: (_ for _ in ()).throw(ProviderError('still paused')))
     with pytest.raises(ProviderError):
         desk.final_quote('005930', {'stance': 'BUY'})
+
+
+def test_daily_bars_are_reused_until_the_next_bar_can_complete():
+    """2026-10-08: a 20-minute reuse made every 30-minute pool scan read all 32 names again (Toss chart 429 at the open)."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app.desk import daily_fresh
+    seoul, ny = ZoneInfo('Asia/Seoul'), ZoneInfo('America/New_York')
+    read = datetime(2026, 10, 8, 9, 30, tzinfo=seoul).timestamp()
+    assert daily_fresh('005930', read, datetime(2026, 10, 8, 15, 0, tzinfo=seoul).timestamp())          # same day
+    assert not daily_fresh('005930', read, datetime(2026, 10, 9, 0, 5, tzinfo=seoul).timestamp())      # past midnight
+    assert not daily_fresh('005930', read, read+6*3600+1)                                               # never over 6 h
+    us = datetime(2026, 10, 7, 22, 0, tzinfo=ny).timestamp()
+    assert daily_fresh('AAPL', us, datetime(2026, 10, 7, 23, 59, tzinfo=ny).timestamp())
+    assert not daily_fresh('AAPL', us, datetime(2026, 10, 8, 0, 3, tzinfo=ny).timestamp())             # New York midnight
