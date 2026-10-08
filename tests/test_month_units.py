@@ -279,6 +279,7 @@ def test_the_same_name_is_not_analysed_again_unless_something_changed():
     assert gate.assess(held=False, signals={'momentum': 'BUY', 'breakout': 'BUY'}, last=last, price=100, now=NOW)['eligible']
     old = dict(last, time=NOW-gate.REANALYZE_SECONDS-1)
     assert gate.assess(held=False, signals=same, last=old, price=100, now=NOW)['eligible'] is True             # long enough ago
+    assert gate.REANALYZE_SECONDS == 2*3600                       # a standing signal is looked at again within the session
 
 
 def test_the_status_line_names_each_name_and_why():
