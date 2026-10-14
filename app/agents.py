@@ -177,6 +177,23 @@ DESK_PROMPTS = {
 
 # The month horizon (see risk.BOUNDS): same roles and the same JSON fields, but the goal is the best expected gain within
 # about a month, judged on up to three months of daily history. These replace the same-named prompts above.
+# The same writing and decision rules for every AI (2026-10-14): Claude wrote sectioned, plain summaries and left price
+# plans after a HOLD on its own, while Codex wrote one dense paragraph and closed 28 of 28 analyses with HOLD, no plan and
+# a 0.6% average weight ("needs a daily close"). Both now get the format and the duty to decide the next step in words.
+WRITING_PROMPT = (' 글쓰기: summary는 투자 경험이 많지 않은 사람이 읽는다고 생각하고 쉬운 한국어 존댓말로 쓰세요. 【머리말】로 단락을 나누고 '
+                  '단락과 항목 사이는 줄바꿈(\\n)으로 구분하며 항목은 "- "로 시작하세요. 한 문장에 숫자는 두세 개까지만 넣고, 전문 용어'
+                  '(예: 평균회귀, 신뢰구간, ATR)는 처음 나올 때 짧게 풀어 쓰세요. 한 덩어리 문단으로 쓰지 마세요.')
+DIRECTOR_FORMAT = (' summary 순서: 【결론】 한두 문장(BUY·HOLD·SELL, 목표 비중, 조건 진입을 남겼는지) → 【직전 분석 이후 달라진 점】(직전 분석이 '
+                   '있을 때) → 【진입 이유】 또는 【지금 사지 않는 이유】 → 【한 달 시나리오】(기본·낙관·비관과 기대 수익률) → 【무효화 조건】 → '
+                   '【반대 근거】.')
+DIRECTOR_ACTION = (' 관망(HOLD)도 결정이므로 다음 행동을 정하세요. 3개월 일봉의 지지·저항이나 이동평균처럼 가격으로 정할 수 있는 매수 지점이 '
+                   '보이면 조건 진입 계획을 남기고, 남기지 않으면 그 이유를 【결론】에 한 문장으로 적으세요. "일봉 종가를 확인해야 한다"는 이유만으로 '
+                   '조건 진입을 거부하지 마세요: 서버가 가격 조건을 여러 번 연속 확인하고, 돌파는 거래량까지 확인한 뒤 체결합니다. 근거가 대체로 '
+                   '우호적인데 확신이 부족하면 낮은 목표 비중의 시험 매수도 선택지이며, 손절과 위험 한도는 서버가 지킵니다.'
+                   ' context.strategy_settings.exit_profile이 market_long인 실험의 미국 종목은 서버가 손절(하루 변동폭의 3배)·익절 기준을 정하고 '
+                   '최대 90일(63거래일)까지 보유합니다. 그때 제안한 손절·익절·보유 기간은 서버 값으로 바뀌므로, 이 차이를 매수 보류의 이유로 '
+                   '삼지 마세요.')
+
 MONTH_PROMPTS = {
     'selector': '당신은 메인 디렉터의 종목 선정 단계입니다. context.market_name 시장의 후보만 비교하며 다른 시장 종목은 고려하지 않습니다. '
                 'context.portfolio.cash는 이 시장 통화(context.currency)의 가상 현금입니다. context.candidates는 서버가 정규장·최신 호가·완료 분봉·'
@@ -226,6 +243,9 @@ MONTH_PROMPTS = {
                 '레버리지 ETF는 현금으로만 매수하고 차입하지 않으며 복리 손실 때문에 한 달 가까이 들고 가는 것은 피하세요. '
                 '근거가 약하거나 비용 대비 기회가 없으면 HOLD. 기업/상품 또는 뉴스 분석가의 실제 URL 근거가 없으면 HOLD. '
                 'summary에 진입 이유, 한 달 시나리오(기대 수익률), 전략 무효화 조건을 명시하고 반대 근거와 출처도 남기세요.'+PREVIOUS_PROMPT['director']+REUSE_PROMPT+COST_PROMPT+ENTRY_PROMPT['month']}
+for _role in ('selector', 'planner', 'fundamental', 'technical', 'news', 'critic', 'director'):
+    MONTH_PROMPTS[_role] += WRITING_PROMPT
+MONTH_PROMPTS['director'] += DIRECTOR_FORMAT+DIRECTOR_ACTION
 
 
 # Added only when the experiment uses the archive's evidence packs (strategy_settings.evidence == 'on'), so the prompts of
@@ -233,23 +253,39 @@ MONTH_PROMPTS = {
 _EVIDENCE = (' context.evidence는 서버가 과거 20년 데이터(2006년~, 국내는 상장 폐지 종목 포함)로 계산한 사실 묶음입니다: '
              'triggered_rules(이번 분석을 시작한 규칙 신호가 같은 시장·종목 유형에서 2006~2018년과 2019~2026년에 낸 거래당 평균 결과, '
              '이 종목에서 같은 신호의 결과. exit는 그 수치를 낸 청산 방식으로, 이 실험이 이 종목에 쓰는 방식과 같습니다), analogs(이 종목에서 같은 신호 조합·같은 시장 상황일 때 21거래일 뒤 결과. baseline_forward_21d는 같은 시장 상황의 아무 날이나 샀을 때라 이것과 비교해야 신호의 효과입니다), regime(시장 상황), '
-             'fundamentals(재무·공시와 공시일), now(현재 위치), long_term(상장 이후 전체 기록: 1·3·5·10년 수익률, 52주 범위와 그 안의 위치, '
+             'fundamentals(재무·공시와 공시일. balance는 부채총계·자본총계·부채비율, valuation은 최근 4분기 주당순이익 기준 PER과 최근 회계연도 말 PER들·그 중앙값 대비 지금 위치), now(현재 위치), long_term(상장 이후 전체 기록: 1·3·5·10년 수익률, 52주 범위와 그 안의 위치, '
              '역대 고점 대비, 역대 최대 낙폭과 회복 기간, 최근 10년 연도별 수익률). 최근 3개월 일봉만 보지 말고 장기 흐름에서 지금이 어디쯤인지 함께 판단하세요. 수치는 비용을 뺀 "규칙대로 샀을 때"의 통계이며 미래를 보장하지 않습니다. '
              '근거 묶음의 수치는 출처 URL이 아니므로 evidence 배열의 URL로 쓰지 마세요. available이 false면 근거 묶음 없이 판단하세요.')
 EVIDENCE_PROMPT = {
     'selector': ' 각 후보의 evidence(과거 근거 요약: summary.sign이 for면 과거 수치 다수가 플러스, against면 마이너스, mixed면 엇갈림. 0에 가까운 수치는 flat으로 세며, 비슷한 상황(analogs)은 그 종목의 평소 21일 수익률(baseline_forward_21d)보다 나았는지로 셉니다)를 비교에 반영하고 '
-                'ranking 이유에 핵심 수치를 인용하세요.',
+                'ranking 이유에 핵심 수치를 인용하세요. valuation(PER과 자기 과거 연말 PER 중앙값 대비 %)과 debt_to_equity_pct(부채비율)도 비교에 참고하세요.',
     'planner': _EVIDENCE+' 조사 지시에 근거 묶음이 이미 답한 것은 반복하지 말고, 수치와 어긋나는 최근 사건이 있는지 확인하게 하세요.',
-    'fundamental': _EVIDENCE+' fundamentals가 있으면 그 실적 수치와 공시일을 먼저 정리하고, 웹 검색은 그 이후의 사건과 다음 실적 일정 위주로 하세요.',
+    'fundamental': _EVIDENCE+' fundamentals가 있으면 그 실적 수치와 공시일을 먼저 정리하고, 부채비율(balance)과 PER(valuation: 지금 값, 과거 연말 PER 중앙값 대비 몇 %인지, 적자 여부)도 함께 적으세요. 웹 검색은 그 이후의 사건과 다음 실적 일정 위주로 하세요.',
     'technical': _EVIDENCE+' triggered_rules와 analogs의 수치를 summary에 인용하고, 지금 차트가 과거 평균과 다른 점이 있으면 설명하세요.',
     'news': _EVIDENCE+' fundamentals.disclosures_30d(국내 공시 제목)가 있으면 그 내용을 먼저 확인하세요.',
-    'critic': _EVIDENCE+' 과거 평균이 마이너스인 신호인데 매수 의견이 나오면 그 근거가 충분한지 특히 따지세요.',
+    'critic': _EVIDENCE+' 과거 평균이 마이너스인 신호인데 매수 의견이 나오면 그 근거가 충분한지 특히 따지세요. PER이 자기 과거 수준보다 크게 높거나(비싸게 사는지) 부채비율이 같은 업종 상식보다 높으면 그 위험도 지적하세요.',
     'director': _EVIDENCE+' summary에 판단의 근거가 된 핵심 수치(그룹·이 종목·비슷한 상황)를 인용하세요. 과거 평균 결과가 마이너스인 신호로 '
                 '매수하려면 그것을 뒤집을 구체적이고 새로운 근거를 제시하고, 근거 묶음과 다르게 판단한 이유를 risks에 적으세요.'}
 
 
+# Added when a held name is analysed because a BUY rule fired again (strategy_settings.held_review == 'add', 2026-10-08:
+# a one-share trial buy was never looked at again). Selling stays with the server's stop, trailing stop and holding limit.
+HELD_ADD_PROMPT = {
+    'planner': ' 이 종목은 이미 보유 중입니다(context.position, context.position_weight_pct). 이번 분석은 매수 신호가 다시 켜져 '
+               '비중을 늘릴지 정하는 것이니, 처음 산 뒤 무엇이 달라졌는지(가격·실적·뉴스·신호) 확인하게 하세요.',
+    'critic': ' 이 종목은 이미 보유 중이며 이번 분석은 추가 매수 검토입니다. 처음 매수 뒤 손실 중인 종목에 더 사는 물타기라면 '
+              '그 근거가 충분한지, 한 종목에 비중이 몰리는 위험을 특히 따지세요.',
+    'director': ' 이 종목은 이미 보유 중입니다(context.position, 현재 비중 context.position_weight_pct). 이번 분석은 매수 신호가 다시 '
+                '켜져 비중을 늘릴지 정하는 것입니다. target_weight_pct는 추가분이 아니라 보유 전체의 목표 비중이며, 지금 비중보다 '
+                '높을 때만 그 차이만큼 삽니다. 처음 매수 뒤 근거가 강해졌으면 BUY로 목표 비중을 올리고, 아니면 HOLD하세요. '
+                '매도는 서버의 손절·추적 손절·보유 기한이 담당하므로 SELL은 실행되지 않습니다. 추가 매수의 손절은 기존 손절가보다 '
+                '느슨해지지 않습니다.'}
+
+
 def with_evidence(prompt, role, context):
     """The role's prompt plus the evidence instructions when this analysis carries an evidence pack."""
+    if context.get('add_review'):
+        prompt += HELD_ADD_PROMPT.get(role, '')
     if context.get('evidence') or any(isinstance(c, dict) and c.get('evidence') for c in context.get('candidates') or []):
         return prompt+EVIDENCE_PROMPT.get(role, '')
     return prompt

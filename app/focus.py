@@ -95,6 +95,12 @@ class FocusMixin:
     def scans_pool(state):
         return state.get('strategy_mode') == 'intraday' and (state.get('strategy_settings') or {}).get('scan') == 'pool'
 
+    @classmethod
+    def adds_to_held(cls, state):
+        """A held name whose BUY rule fires again is analysed for adding to it (strategy_settings.held_review == 'add',
+        2026-10-08); selling stays with the stop, trailing stop and holding limit either way."""
+        return cls.scans_pool(state) and (state.get('strategy_settings') or {}).get('held_review') == 'add'
+
     def signal_symbols(self, state, market, now=None):
         if not self.scans_pool(state):
             return []
@@ -121,6 +127,7 @@ class FocusMixin:
         mode = settings.get('signal_filter', 'all')
         risk = self.risk_budget(state) or {}
         held = set(state.get('positions') or {})
+        adding = self.adds_to_held(state)
         found, checked, overview = {}, 0, []
         for market in MARKETS:
             currency = 'KRW' if market == 'KR' else 'USD'
@@ -145,15 +152,16 @@ class FocusMixin:
                 atr_pct = sum(ranges)/len(ranges)/last*100 if ranges else 0
                 # A name the account can never buy (one share's stop already exceeds the risk budget) is never analysed;
                 # the overview says so instead of showing its signal as "AI 분석 대상" (2026-10-07: SK하이닉스 at 1.78M won).
-                blocked = [] if symbol in held else universe.unaffordable({'last': last, 'atr_pct': atr_pct}, item, None, risk)
+                quiet = symbol in held and not adding     # held and only the exit rules look after it
+                blocked = [] if quiet else universe.unaffordable({'last': last, 'atr_pct': atr_pct}, item, None, risk)
                 try:                                      # the dashboard's one-line-per-name overview (no chart)
-                    b = rule_board(rows, symbol in held, ignore, sells_off=symbol in held)
+                    b = rule_board(rows, quiet, ignore, sells_off=quiet)
                     overview.append({'symbol': symbol, 'name': item['name'], 'market': market, 'currency': item['currency'],
                                      'held': symbol in held, 'side': b['side'], 'last_close': b['last_close'], 'rules': b['rules'],
                                      **({'unaffordable': blocked[0]} if blocked else {})})
                 except (KeyError, TypeError, ValueError, ZeroDivisionError):
                     pass
-                if symbol in held or blocked:
+                if quiet or blocked:
                     continue
                 fired = [r for r, v in rule_signals(rows).items() if v == 'BUY' and r not in ignore]
                 if not fired:

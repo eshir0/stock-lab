@@ -450,3 +450,36 @@ def test_a_failing_direct_usage_read_is_shown_on_the_provider():
     data['claude']['direct']['enabled'] = False                          # USAGE_DIRECT=off: nothing to warn about
     gate.cache = None
     assert 'direct_note' not in gate.status('claude')
+
+
+def test_an_expired_or_missing_login_is_said_at_once_with_the_last_reading_kept():
+    """2026-10-09: the bridge only reads the CLIs' login tokens (the CLIs renew them when they run). An expired token or a
+    missing login is shown immediately in the usage card, with the last numbers and their time; other failures after
+    ten minutes."""
+    now = 1_000_000.0
+    c = SimpleNamespace(mode='toss', provider_order=['claude', 'codex'], ai_switch_pct=90.0)
+    reading = {'windows': {'five_hour': {'utilization': .4, 'resets_at': now+3600}}, 'at': now-45*60}
+    data = {'claude': {'limits': reading, 'direct': {'enabled': True, 'ok_at': now-45*60, 'failed_at': now-30, 'state': 'expired'}},
+            'codex': {'direct': {'enabled': True, 'failed_at': now-30, 'state': 'no_login'}}}
+    gate = UsageGate(c, fetch=lambda: data, clock=lambda: now)
+    claude, codex = gate.status('claude'), gate.status('codex')
+    assert claude['login_note'].startswith('Claude: 로그인 만료') and 'Claude Code를 한 번 실행' in claude['login_note']
+    assert claude['pct'] == 40.0 and claude['read_at'] == now-45*60 and claude['old'] is True     # last numbers stay, marked old
+    assert codex['login_note'] == 'Codex: 이 서버에 Codex 로그인이 없습니다'
+    data['claude']['direct'] = {'enabled': True, 'ok_at': now-5*60, 'failed_at': now-30, 'state': 'error'}
+    gate.cache = None
+    assert 'login_note' not in gate.status('claude')                      # a passing hiccup is not shown yet
+    data['claude']['direct']['ok_at'] = now-20*60
+    gate.cache = None
+    assert gate.status('claude')['login_note'] == 'Claude: 사용량을 읽지 못했습니다'
+    data['claude']['direct'] = {'enabled': True, 'ok_at': now-10, 'failed_at': now-60*60, 'state': 'ok'}
+    gate.cache = None
+    assert 'login_note' not in gate.status('claude')                      # Claude Code ran, the read works again
+
+
+def test_a_reading_taken_from_a_call_answer_carries_its_time():
+    now = 1_000_000.0
+    c = SimpleNamespace(mode='toss', provider_order=['claude'], ai_switch_pct=90.0)
+    gate = UsageGate(c, fetch=lambda: {}, clock=lambda: now)
+    gate.observe('claude', {'windows': {'five_hour': {'utilization': .2, 'resets_at': now+60}}})
+    assert gate.status('claude')['read_at'] == now and 'old' not in gate.status('claude')

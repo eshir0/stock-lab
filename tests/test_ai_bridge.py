@@ -1,5 +1,6 @@
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -356,3 +357,45 @@ def test_the_direct_usage_read_reports_each_providers_success_and_failure(monkey
     assert ai_bridge._direct['claude']['error'] and ai_bridge._direct['codex']['error'] and 'ok_at' not in ai_bridge._direct['claude']
     ai_bridge._direct_result('claude')
     assert ai_bridge._direct['claude']['error'] == '' and ai_bridge._direct['claude']['ok_at'] >= ai_bridge._direct['claude']['failed_at']
+
+
+# ---- why the direct read stopped: an expired login is told apart from other failures (2026-10-09) ----------------------------
+
+def claude_login(tmp_path, expires_at):
+    folder = tmp_path/'.claude'
+    folder.mkdir(exist_ok=True)
+    (folder/'.credentials.json').write_text(json.dumps({'claudeAiOauth': {'accessToken': 'tok', 'expiresAt': expires_at}}))
+
+
+def test_a_login_past_its_expiry_is_not_asked_and_reads_as_expired(monkeypatch, tmp_path):
+    monkeypatch.setattr(ai_bridge, '_direct', {})
+    asked = []
+    monkeypatch.setattr(ai_bridge, '_get_json', lambda url, headers: asked.append(url) or {})
+    claude_login(tmp_path, (time.time()-60)*1000)
+    ai_bridge.read_direct(home=str(tmp_path))
+    assert ai_bridge._direct['claude']['state'] == 'expired' and ai_bridge.CLAUDE_USAGE_URL not in asked
+    assert ai_bridge._direct['codex']['state'] == 'no_login'
+
+
+def test_a_refused_token_reads_as_expired_and_other_failures_as_errors(monkeypatch, tmp_path):
+    import urllib.error
+    monkeypatch.setattr(ai_bridge, '_direct', {})
+    claude_login(tmp_path, (time.time()+3600)*1000)
+    def refuse(code):
+        def get(url, headers):
+            raise urllib.error.HTTPError(url, code, 'no', {}, None)
+        return get
+    monkeypatch.setattr(ai_bridge, '_get_json', refuse(401))
+    ai_bridge.read_direct(home=str(tmp_path))
+    assert (ai_bridge._direct['claude']['state'], ai_bridge._direct['claude']['error']) == ('expired', 'HTTP 401')
+    monkeypatch.setattr(ai_bridge, '_get_json', refuse(503))
+    ai_bridge.read_direct(home=str(tmp_path))
+    assert (ai_bridge._direct['claude']['state'], ai_bridge._direct['claude']['error']) == ('error', 'HTTP 503')
+
+
+def test_no_login_file_reads_as_no_login_and_a_success_as_ok(monkeypatch, tmp_path):
+    monkeypatch.setattr(ai_bridge, '_direct', {})
+    ai_bridge.read_direct(home=str(tmp_path))
+    assert ai_bridge._direct['claude']['state'] == 'no_login'
+    ai_bridge._direct_result('claude')
+    assert ai_bridge._direct['claude']['state'] == 'ok'

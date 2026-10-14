@@ -21,10 +21,12 @@ ExecStart=/usr/bin/docker run --rm --name stocklab-evidence --memory 3g --cpus 1
 ExecStart=/usr/bin/docker run --rm --name stocklab-data --memory 2g --cpus 1.5 --read-only --tmpfs /tmp \
   --cap-drop ALL --security-opt no-new-privileges -e DATA=/data \
   -v /opt/stocklab-data:/code:ro -v /srv/stocklab-data:/data stocklab-data python collector.py all
-ExecStart=/usr/bin/docker run --rm --name stocklab-sec --memory 4g --cpus 1 --read-only --tmpfs /tmp \
+# SEC and DART are best effort ('-'): a failure there must not keep the evidence rebuild and Q6 below from running
+# (2026-10-08: a DART error stopped the job at that step).
+ExecStart=-/usr/bin/docker run --rm --name stocklab-sec --memory 4g --cpus 1 --read-only --tmpfs /tmp \
   --cap-drop ALL --security-opt no-new-privileges -e DATA=/data --env-file /opt/stocklab-data/contact.env \
   -v /opt/stocklab-data:/code:ro -v /srv/stocklab-data:/data stocklab-data python sec.py
-ExecStart=/usr/bin/docker run --rm --name stocklab-dart --memory 2g --cpus 1 --read-only --tmpfs /tmp \
+ExecStart=-/usr/bin/docker run --rm --name stocklab-dart --memory 2g --cpus 1 --read-only --tmpfs /tmp \
   --cap-drop ALL --security-opt no-new-privileges -e DATA=/data --env-file /opt/stocklab-data/contact.env \
   -v /opt/stocklab-data:/code:ro -v /srv/stocklab-data:/data stocklab-data python dart.py
 ExecStart=/usr/bin/docker run --rm --name stocklab-evidence2 --memory 3g --cpus 1 --read-only --tmpfs /tmp \

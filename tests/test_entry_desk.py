@@ -243,9 +243,10 @@ def test_the_size_comes_from_the_same_sizing_as_an_analysed_buy(day):
     poll(day, 2)
     state = day.store.read()
     trade = state['trades'][0]
-    # 20% of a 1,000,000 won account at about 70,700 won is two whole shares: the plan's weight, not anything the watch invents
-    assert trade['quantity'] == 2 and trade['sizing']['quantity'] == 2 and trade['sizing']['target_quantity'] == 2
-    assert state['cash']['KRW'] < 1000000 - 2*LEVEL
+    # 20% of a 1,000,000 won account at about 70,700 won is 2.8 shares, three to the nearest share: the plan's weight, not
+    # anything the watch invents
+    assert trade['quantity'] == 3 and trade['sizing']['quantity'] == 3 and trade['sizing']['target_quantity'] == 3
+    assert state['cash']['KRW'] < 1000000 - 3*LEVEL
 
 
 def test_a_single_quote_in_the_zone_is_not_enough(day):

@@ -182,7 +182,7 @@ def test_the_risk_limit_can_be_the_tighter_one_and_is_fractional_too():
 
 def test_whole_share_markets_still_get_whole_shares():
     result = sized(70_000.0, weight=20, stop=2.0, take=4.0, nav=1_000_000.0, fractional=False, currency_symbol='005930')
-    assert isinstance(result['quantity'], int) and result['quantity'] == 2
+    assert isinstance(result['quantity'], int) and result['quantity'] == 3      # 200,000 / 70,035 = 2.86 -> nearest share
 
 
 def test_a_fractional_order_below_the_minimum_amount_is_held_back():

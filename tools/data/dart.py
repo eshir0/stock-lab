@@ -72,6 +72,9 @@ class Client:
             body = r.json()
             if body.get('status') == '020':
                 raise Quota('DART daily limit reached')
+            if body.get('status') == '800':
+                # System maintenance (2026-10-08/09): stop for today. Going on would record empty disclosure months as done.
+                raise Quota('DART under maintenance: '+str(body.get('message') or '')[:80])
             if body.get('status') in ('010', '011', '012', '901'):
                 raise SystemExit(f'DART refused the key: {body.get("message")}')
             return body
@@ -86,7 +89,19 @@ def write(df, path):
 
 
 def corps(c):
-    raw = zipfile.ZipFile(io.BytesIO(c.get('corpCode.xml'))).read('CORPCODE.xml')
+    content = c.get('corpCode.xml')
+    try:
+        raw = zipfile.ZipFile(io.BytesIO(content)).read('CORPCODE.xml')
+    except zipfile.BadZipFile:
+        # DART answers an error as a small JSON or XML body instead of the zip (2026-10-08 22:43: the whole data job
+        # stopped here, and the evidence rebuild and Q6 after it never ran). Yesterday's list is still good: keep it.
+        text = content[:300].decode('utf-8', 'replace') if isinstance(content, bytes) else str(content)[:300]
+        if '020' in text:
+            raise Quota('DART daily limit reached')
+        if (DATA/'corps.parquet').exists():
+            log('company list not available today, keeping the last one: '+' '.join(text.split())[:160])
+            return pd.read_parquet(DATA/'corps.parquet')
+        raise Quota('DART company list not available: '+' '.join(text.split())[:160])
     rows = [{k: (x.findtext(k) or '').strip() for k in ('corp_code', 'corp_name', 'stock_code', 'modify_date')}
             for x in ET.fromstring(raw).iter('list')]
     df = pd.DataFrame(rows)

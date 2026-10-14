@@ -121,6 +121,13 @@ def test_the_plan_is_fixed_at_the_start_with_a_fingerprint_of_the_strategy():
     assert verification.fingerprint(Config(mode='demo', password='z'*9, session_secret='w'*33)) == plan['fingerprint']   # not a secret's business
 
 
+def test_the_evidence_instructions_are_part_of_the_strategy(monkeypatch):
+    from app import agents
+    before = verification.fingerprint(CFG)
+    monkeypatch.setitem(agents.EVIDENCE_PROMPT, 'director', agents.EVIDENCE_PROMPT['director']+' x')
+    assert verification.fingerprint(CFG) != before
+
+
 def test_a_strategy_that_clears_every_bar_passes():
     verdict = judge()
     assert verdict['status'] == 'pass' and verdict['ready'] and not verdict['strategy_changed']

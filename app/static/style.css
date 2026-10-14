@@ -260,6 +260,7 @@ section[id]{scroll-margin-top:96px}
 .ring{--pct:0;position:relative;display:grid;place-items:center;flex:0 0 auto;width:92px;height:92px;border-radius:50%;font-weight:800;font-size:.95rem;font-variant-numeric:tabular-nums}
 .ring::before{content:'';position:absolute;inset:0;border-radius:50%;background:conic-gradient(from 0deg,#7a5cff 0,#33c8e6 calc(var(--pct)*1%),var(--track) 0);-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 11px),#000 calc(100% - 10px));mask:radial-gradient(farthest-side,transparent calc(100% - 11px),#000 calc(100% - 10px))}
 .ring span{position:relative}
+.ai-login-note{margin:-4px 0 10px;text-align:right;font-size:.72rem;line-height:1.5;font-weight:600;color:var(--warn)}
 .cycle-budget{margin-top:14px;font-size:.78rem;line-height:1.85}
 .metric-explainer{font-size:.78rem;color:var(--muted);border-top:1px solid var(--line);padding-top:14px;margin-top:16px}
 .metric-explainer p+p{margin-top:8px}
@@ -448,6 +449,9 @@ td.empty-cell{padding:30px 10px;text-align:center;color:var(--muted)}
 .legend .no i{background:var(--loss-vivid)}
 .position-note{margin-top:16px;font-size:.75rem;line-height:1.9}
 .entry-thesis{width:180px;max-width:180px;margin-top:5px;font-size:.72rem;line-height:1.7;color:var(--muted);white-space:normal;overflow-wrap:anywhere}
+.entry-thesis summary{cursor:pointer;width:max-content;color:var(--muted);font-weight:600;list-style-position:inside}
+.entry-thesis summary:hover{color:var(--ink)}
+.entry-thesis p{margin:6px 0 0;max-height:220px;overflow:auto;white-space:pre-line}
 .monitor-off{display:block;margin-top:5px;font-size:.7rem;color:var(--warn)}
 .gate-status{margin:-8px 0 18px;padding-left:4px}
 .trail-tag{display:block;margin-top:5px;font-size:.7rem;color:var(--gain)}

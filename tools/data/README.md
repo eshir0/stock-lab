@@ -45,6 +45,7 @@ flowchart LR
 
 - `research_plan_us_hold.json` + `portfolio.py`의 `hold`·`pool=pit` (2026-10-07): 미국 넓은 손절의 최대 보유 21/42/63거래일 비교(63 채택)와, 매달 그 당시 거래대금 상위 17종목으로 다시 계산한 사후 선택 측정(전략이 S&P 500보다 낮음).
 
+- `research_plan_scale_in.json` + `portfolio.py`의 `scale`(single·confirm·dip·time)·`filter=research_v2` (2026-10-08): 분할 매수 3가지를 한 번에 사기와 비교. 모두 탈락(낙폭은 얕아지나 수익률이 낮아짐), 결과 `results/research-scale-in.json`.
 - `research_plan_us_signals.json` + `research.py --us-wide-signals` (2026-10-07): 미국 신호 필터를 넓은 손절·63거래일 기준으로 다시 잼(모든 신호가 두 기간 모두 플러스 → `research_v2`는 미국 제외 없음). `evidence.py`는 미국 종목에 이 청산 방식의 신호 성적(`us_long`)과 재현 성적(`replay_us_long`)도 넣음.
 
 ## 📁 폴더 구조
@@ -120,7 +121,7 @@ docker run --rm -e DATA=/data -v /opt/stocklab-data:/code:ro -v /opt/stock-lab:/
 
 ## 🧾 근거 묶음 · 환율
 
-- `evidence.py`(매일 수집 직후): 사이트 종목마다 `evidence/{종목}.json` — 지금 신호, 신호별 20년 성적(시장·유형/이 종목), 비슷한 상황의 21거래일 결과, 시장 상황, SEC·DART 재무·공시, 최근 배당. 앱이 읽기 전용으로 읽어 AI 분석과 배당 입금에 씀.
+- `evidence.py`(매일 수집 직후): 사이트 종목마다 `evidence/{종목}.json` — 지금 신호, 신호별 20년 성적(시장·유형/이 종목), 비슷한 상황의 21거래일 결과, 시장 상황, SEC·DART 재무·공시(미국 4분기는 연간 − 1~3분기 누적으로 채움), 부채총계·자본총계·**부채비율**, **PER**(최근 4분기 주당순이익 기준, 분할 반영)과 최근 회계연도 말 PER들·그 중앙값 대비 위치, 최근 배당. 앱이 읽기 전용으로 읽어 AI 분석과 배당 입금에 씀.
 - `fx.py` + `stocklab-fx.timer`(10분마다): `evidence/fx.json`에 원/달러(Yahoo KRW=X). 앱이 미국 계좌의 원화 가치를 계산.
 
 ## ⚠ 한계

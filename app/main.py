@@ -319,6 +319,14 @@ def create_app(config=None, background=True, test=False):
         engine.set_execution(data.mode)
         return {'ok': True}
 
+    class Risk(BaseModel):
+        risk_per_trade_pct: float = Field(ge=.1, le=2, allow_inf_nan=False, strict=True)
+
+    @app.post('/api/settings/risk')
+    def risk(data: Risk):
+        engine.set_risk(data.risk_per_trade_pct)
+        return {'ok': True}
+
     class Experiment(BaseModel):
         seed_krw: float = Field(ge=0, le=1e12, allow_inf_nan=False, strict=True)
         seed_usd: float = Field(ge=0, le=1e9, allow_inf_nan=False, strict=True)
@@ -337,6 +345,7 @@ def create_app(config=None, background=True, test=False):
         evidence: Literal['on', 'off'] = 'on'
         scan: Literal['focus', 'pool'] = 'pool'
         exit_profile: Literal['ai', 'market', 'market_long'] = 'market_long'
+        held_review: Literal['off', 'add'] = 'add'
         confirmation: str
 
     @app.post('/api/experiments')
@@ -351,6 +360,7 @@ def create_app(config=None, background=True, test=False):
                                           'universe_mode': data.universe_mode, 'horizon': data.horizon,
                                           'exit_mode': data.exit_mode, 'signal_filter': data.signal_filter,
                                           'evidence': data.evidence, 'scan': data.scan, 'exit_profile': data.exit_profile,
+                                          'held_review': data.held_review,
                                           'max_position_pct': (data.max_position_pct if data.max_position_pct is not None
                                                                else 30),
                                           'risk_per_trade_pct': data.risk_per_trade_pct,

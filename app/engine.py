@@ -156,6 +156,29 @@ class Engine(DeskMixin, FocusMixin):
             label = '자동 모의체결' if mode == 'auto' else '사용자 승인'
             event(s, f'{label} 모드로 설정했습니다. 시작 버튼을 누르면 실행됩니다.')
 
+    def set_risk(self, pct):
+        """Change the running experiment's risk per trade (stopped first, like the execution mode). Only new orders use it;
+        open positions keep their size and stops. The change is kept in the verification plan, since results before and
+        after it were sized differently (2026-10-09: the owner raised 0.5% to 1%)."""
+        with self.store.edit() as s:
+            if s['running'] or s['liquidating']:
+                raise RuleError('먼저 중지한 뒤 거래당 위험을 변경하세요.')
+            settings = normalize_settings(dict(s.get('strategy_settings') or {}, risk_per_trade_pct=pct))
+            before = (s.get('strategy_settings') or {}).get('risk_per_trade_pct', .5)
+            if settings['risk_per_trade_pct'] == before:
+                return
+            s['strategy_settings'] = settings
+            s['generation'] += 1
+            for p in s['proposals']:
+                if p['status'] == 'pending':
+                    p['status'] = 'invalidated'
+            now = time.time()
+            if s.get('verification') is not None:
+                s['verification'].setdefault('setting_changes', []).append(
+                    {'time': now, 'key': 'risk_per_trade_pct', 'from': before, 'to': settings['risk_per_trade_pct']})
+            event(s, f'거래당 위험을 {before:g}%에서 {settings["risk_per_trade_pct"]:g}%로 바꿨습니다. 이후 새 주문부터 적용되고, '
+                     '보유 종목의 수량·손절은 그대로입니다. 성적표에는 변경 전후 거래가 섞입니다.')
+
     def new_experiment(self, krw, usd, name='', max_order_pct=30, strategy_mode='legacy', strategy_settings=None):
         values = (krw, usd, max_order_pct)
         if any(type(v) not in (int, float) or not math.isfinite(v) for v in values):
@@ -188,6 +211,7 @@ class Engine(DeskMixin, FocusMixin):
                 s['verification']['evidence'] = (s.get('strategy_settings') or {}).get('evidence', 'off')
                 s['verification']['scan'] = (s.get('strategy_settings') or {}).get('scan', 'focus')
                 s['verification']['exit_profile'] = (s.get('strategy_settings') or {}).get('exit_profile', 'ai')
+                s['verification']['held_review'] = (s.get('strategy_settings') or {}).get('held_review', 'off')
         return result
 
     def fractional(self, currency):

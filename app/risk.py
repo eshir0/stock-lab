@@ -144,8 +144,11 @@ def normalize_settings(settings=None):
     use_evidence = settings.get('evidence', 'off')              # ... and analyse without the archive's evidence packs
     scan = settings.get('scan', 'focus')                         # ... and only look at the daily focus list
     exit_profile = settings.get('exit_profile', 'ai')            # ... and let the AI choose every stop and target
+    held_review = settings.get('held_review', 'off')             # ... and never look at a held name again
     if exit_profile not in EXIT_PROFILES:
         raise RiskError('손절·익절 폭 방식은 ai, market, market_long 중 하나여야 합니다.')
+    if held_review not in ('off', 'add'):
+        raise RiskError('보유 종목 분석은 off 또는 add여야 합니다.')
     if scan not in ('focus', 'pool'):
         raise RiskError('후보 확인 범위는 focus 또는 pool이어야 합니다.')
     if use_evidence not in ('on', 'off'):
@@ -157,7 +160,7 @@ def normalize_settings(settings=None):
     return {'include_leveraged_etfs': leveraged, 'universe_mode': universe, 'horizon': horizon,
             'risk_per_trade_pct': float(risk), 'daily_loss_limit_pct': float(daily), 'max_holding_minutes': int(holding),
             'max_position_pct': shares.number(position), 'exit_mode': exit_mode, 'signal_filter': signal_filter, 'evidence': use_evidence, 'scan': scan,
-            'exit_profile': exit_profile}
+            'exit_profile': exit_profile, 'held_review': held_review}
 
 
 def _instrument(symbol):
@@ -255,7 +258,13 @@ def size_order(state, symbol, quote, decision, constraints, config, now=None):
     entry = _money(ask*(1+slip))
     if entry <= 0:
         raise RiskError('체결 단가가 최소 계산 단위보다 작습니다.')
-    target_total = shares.floor_to(nav*weight/100/entry, fractional)
+    # A whole-share BUY rounds its target to the nearest share: rounding down turned a 5.5% target for one 387,750원
+    # share of a 7,000,000원 account (0.99 shares) into no order at all (2026-10-08 HD현대중공업). The owner prefers
+    # overshooting the weight by under half a share to missing the trade; the risk, position and cash limits below still
+    # round down and cap it. Sells and fractional shares keep rounding down.
+    raw_target = nav*weight/100/entry
+    nearest = side == 'BUY' and not fractional
+    target_total = raw_target.quantize(Decimal(1), rounding=ROUND_HALF_UP) if nearest else shares.floor_to(raw_target, fractional)
     target_delta = max(Decimal(0), target_total-held) if side == 'BUY' else max(Decimal(0), held-target_total)
     result = {'quantity': 0, 'target_quantity': shares.number(target_delta), 'risk_quantity': 0,
               'max_buy_quantity': shares.number(max_buy), 'estimated_stop_risk': 0.0, 'reason': '',
@@ -339,8 +348,11 @@ def size_order(state, symbol, quote, decision, constraints, config, now=None):
         result['reason'] = '소수점 주문은 최소 1달러 이상이어야 해서 이번 주문은 보류합니다.'
     elif quantity:
         result['reason'] = '목표 비중·거래당 위험·총 손절 위험·ETF 환산 노출·현금 한도 안에서 수량을 계산했습니다.'
+    elif target_delta == 0 and held > 0:
+        result['reason'] = f'이미 목표 비중({float(weight):g}%)만큼 보유하고 있습니다.'
     elif target_delta == 0:
-        result['reason'] = '목표 비중에 이미 도달했거나 1주를 살 만큼의 목표 금액이 없습니다.'
+        result['reason'] = (f'목표 비중 {float(weight):g}%({float(_money(nav*weight/100)):,.0f})로는 '
+                            f'1주({float(entry):,.0f})의 절반도 사지 못합니다.')
     elif max_buy == 0:
         result['reason'] = '현금·종목 비중·호가 잔량 한도로 신규 매수 수량이 0주입니다.'
     elif exposure_quantity == 0:

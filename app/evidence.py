@@ -128,5 +128,8 @@ def brief(pack, rules, exit='base'):
         return None
     return {'summary': summary(pack, rules, exit), 'triggered_rules': triggers(pack, rules, exit),
             'analogs_21d': (pack.get('analogs') or {}).get('forward_21d'), 'now': pack.get('now'),
+            'valuation': {k: ((pack.get('fundamentals') or {}).get('valuation') or {}).get(k)
+                          for k in ('per_ttm', 'per_history_median', 'per_vs_history_median_pct', 'loss_making')},
+            'debt_to_equity_pct': ((pack.get('fundamentals') or {}).get('balance') or {}).get('debt_to_equity_pct'),
             'long_term': {k: (pack.get('long_term') or {}).get(k) for k in ('ret_1y_pct', 'ret_5y_pct', 'position_in_52w_pct',
                                                                      'from_all_time_high_pct', 'max_drawdown_pct')}}

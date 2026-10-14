@@ -18,7 +18,8 @@ REANALYZE_SECONDS = 2*3600     # the same name is not analysed again inside this
                                # with a standing signal got one look a session) ...
 REANALYZE_MOVE_PCT = 3.0       # ... unless its price moved this much since that analysis, or another rule fired
 REASONS = {'signal': '규칙 신호', 'requested': '직접 요청', 'no_signal': '규칙 신호 없음',
-           'recent': '최근 분석함', 'no_data': '일봉 부족', 'filtered': '연구로 제외한 매수 신호뿐', 'holding': '보유 중 · 청산 규칙이 관리'}
+           'recent': '최근 분석함', 'no_data': '일봉 부족', 'filtered': '연구로 제외한 매수 신호뿐', 'holding': '보유 중 · 청산 규칙이 관리',
+           'add': '보유 중 · 추가 매수 검토', 'held_quiet': '보유 중 · 매수 신호 없음'}
 # Buy signals that no longer call the AI, per market and instrument type, from the pre-registered 2006-2026 research
 # (tools/data/research_plan.json, Q1): dropped where the develop period (2006-2018) had a 95% interval entirely below
 # zero AND the holdout (2019-2026) was negative too. Experiments choose it with strategy_settings.signal_filter.

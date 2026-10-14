@@ -359,3 +359,34 @@ def test_an_empty_or_intraday_only_summary_still_shows_the_old_horizons():
     old = entry(horizon='intraday', outcomes={'30': {'returns': {'AAA': 1.0}}})
     summary = evaluation.summarize([old])
     assert summary['active'] == ['30', '60'] and summary['pending'] == 1
+
+
+def test_a_whole_share_buy_rounds_to_the_nearest_share():
+    # 2026-10-08 HD현대중공업: BUY at 5.5% of 7,000,000원 = 385,000원 for a 387,750원 share. Rounding down made it 0 shares
+    # and no order, though the AI sized it as one share and the risk and position limits allowed one.
+    quote = {'bid': 387500.0, 'ask': 387750.0, 'last': 387750.0, 'session_end': NOW+3600}
+    limits = {'portfolio_equity': 7_000_000, 'max_buy_quantity': 5, 'max_sell_quantity': 0}
+    settings = {'horizon': 'month', 'risk_per_trade_pct': 0.7}
+    state = {'strategy_settings': settings, 'positions': {}, 'quotes': {}}
+    buy = size_order(state, '329180', quote, plan(target_weight_pct=5.5, stop_loss_pct=7, take_profit_pct=14), limits, Cfg, now=NOW)
+    assert buy['target_quantity'] == 1 and buy['quantity'] == 1
+    small = size_order(state, '329180', quote, plan(target_weight_pct=2, stop_loss_pct=7, take_profit_pct=14), limits, Cfg, now=NOW)
+    assert small['quantity'] == 0 and '절반도 사지 못합니다' in small['reason']        # 140,000원 is not worth one share
+    held = {'strategy_settings': settings, 'positions': {'329180': {'quantity': 1, 'stop_price': 360000, 'average': 387750}},
+            'quotes': {'329180': {**quote, 'last': 387750.0, 'ask': 387750.0, 'bid': 387500.0}}}
+    again = size_order(held, '329180', quote, plan(target_weight_pct=5.5, stop_loss_pct=7, take_profit_pct=14), limits, Cfg, now=NOW)
+    assert again['quantity'] == 0 and '이미 목표 비중' in again['reason']
+    over = size_order(state, '329180', quote, plan(target_weight_pct=14, stop_loss_pct=3, take_profit_pct=14), limits, Cfg, now=NOW)
+    assert over['target_quantity'] == 3 and over['quantity'] == 3              # 980,000원 = 2.53 shares -> 3, within the limits
+    capped = size_order(state, '329180', quote, plan(target_weight_pct=30, stop_loss_pct=3, take_profit_pct=14),
+                        dict(limits, max_buy_quantity=5), Cfg, now=NOW)
+    assert capped['target_quantity'] == 5 and capped['quantity'] <= 5          # 5.4 shares -> 5; the 30% cap still holds
+
+
+def test_every_ai_gets_the_same_writing_and_decision_rules():
+    # 2026-10-14: Codex wrote one dense paragraph and closed every analysis with HOLD and no plan; Claude did neither.
+    from app.agents import DIRECTOR_ACTION, DIRECTOR_FORMAT, WRITING_PROMPT
+    for role in ('selector', 'planner', 'fundamental', 'technical', 'news', 'critic', 'director'):
+        assert MONTH_PROMPTS[role].endswith(WRITING_PROMPT) or WRITING_PROMPT in MONTH_PROMPTS[role]
+    assert MONTH_PROMPTS['director'].endswith(DIRECTOR_FORMAT+DIRECTOR_ACTION)
+    assert '종가' in DIRECTOR_ACTION and '90일' in DIRECTOR_ACTION and '【결론】' in DIRECTOR_FORMAT

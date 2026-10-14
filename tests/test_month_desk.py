@@ -530,3 +530,40 @@ def test_daily_bars_are_reused_until_the_next_bar_can_complete():
     us = datetime(2026, 10, 7, 22, 0, tzinfo=ny).timestamp()
     assert daily_fresh('AAPL', us, datetime(2026, 10, 7, 23, 59, tzinfo=ny).timestamp())
     assert not daily_fresh('AAPL', us, datetime(2026, 10, 8, 0, 3, tzinfo=ny).timestamp())             # New York midnight
+
+
+def test_a_momentarily_invalid_book_does_not_throw_a_finished_analysis_away(desk, monkeypatch):
+    # 2026-10-08 11:37: the book was empty or crossed for an instant when a 7-minute analysis finished.
+    from app.engine import RuleError
+    monkeypatch.setattr(desk, 'FINAL_QUOTE_WAIT', 0)
+    def invalid(symbol):
+        raise RuleError('정규장 또는 유효한 호가를 기다리고 있습니다.')
+    monkeypatch.setattr(desk, 'quote_for_trade', invalid)
+    desk.refresh()
+    assert desk.final_quote('005930', {'stance': 'HOLD'})['symbol'] == '005930'      # recorded on the poll's quote
+    tries = []
+    def recovers(symbol):
+        tries.append(symbol)
+        if len(tries) < 2:
+            raise RuleError('정규장 또는 유효한 호가를 기다리고 있습니다.')
+        return {'symbol': symbol, 'fresh': True}
+    monkeypatch.setattr(desk, 'quote_for_trade', recovers)
+    assert desk.final_quote('005930', {'stance': 'BUY'}) == {'symbol': '005930', 'fresh': True}
+    monkeypatch.setattr(desk, 'quote_for_trade', invalid)
+    with pytest.raises(RuleError):
+        desk.final_quote('005930', {'stance': 'BUY'})                                  # an order still needs a valid book
+
+
+def test_the_risk_per_trade_can_be_changed_while_stopped_and_the_change_is_kept(client):
+    # 2026-10-09: the owner raised a running experiment's risk per trade from 0.5% to 1%.
+    assert client.post('/api/experiments', json=experiment(horizon='month')).status_code == 200
+    assert client.post('/api/start').status_code == 200
+    assert client.post('/api/settings/risk', json={'risk_per_trade_pct': 1.0}).status_code != 200      # running: refused
+    assert client.post('/api/stop').status_code == 200
+    assert client.post('/api/settings/risk', json={'risk_per_trade_pct': 5.0}).status_code == 422      # above 2%
+    assert client.post('/api/settings/risk', json={'risk_per_trade_pct': 1.0}).status_code == 200
+    state = client.get('/api/state').json()
+    assert state['strategy_settings']['risk_per_trade_pct'] == 1.0 and state['strategy_settings']['horizon'] == 'month'
+    change = state['verification']['setting_changes'][-1]
+    assert (change['key'], change['from'], change['to']) == ('risk_per_trade_pct', .5, 1.0)
+    assert any('거래당 위험을 0.5%에서 1%로' in e['message'] for e in state['events'])

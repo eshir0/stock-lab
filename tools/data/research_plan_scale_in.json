@@ -1,0 +1,16 @@
+{
+  "registered": "2026-10-08 (KST), before any of these runs",
+  "purpose": "The owner asked whether the site buys in parts (분할 매수). Today each trade buys its whole size at once. Test whether splitting the entry into two halves would have done better, under the exits new experiments use.",
+  "setup": "portfolio.py: daily account simulation, research_v2 signal filter (KR drops golden_cross, momentum, breakout; US drops nothing), real costs, risk 0.7% of equity per trade at the stop distance, 30% per name, KRW 7,000,000 / USD 750, KR whole shares, US fractional. KR exit: trailing stop 1.5x ATR, take 1.5x stop, 21 sessions. US exit: 3x ATR, take 3x stop, 63 sessions (market_long). Stops and the trailing rule always follow the FIRST buy's price; the second buy never moves the stop. Develop 2006-2018, holdout 2019-2026.",
+  "variants": {
+    "single": "the whole planned size at the next open after the signal (today's rule)",
+    "confirm": "half at the next open; the other half at the next open after a close at least 1x ATR above the first buy within 10 sessions, sized so the trade's total risk to the stop stays within the 0.7% budget",
+    "dip": "half at the next open; the other half (same number of shares) at the next open after a close at or below the first buy minus half the stop distance within 10 sessions, if the open is still above the stop (classic averaging down)",
+    "time": "half at the next open; the other half at the open 5 sessions later if the position is still open and above the stop, within the 0.7% risk budget"
+  },
+  "kr_whole_shares": "When half of the planned KR size is under one share, the variant buys the whole size at once (no split possible).",
+  "universe": "KR: the site's 32-name pool (hindsight noted). US: the site's 17 US names AND the point-in-time list (top 17 by 60-day traded value each month, research_plan_us_hold.json part B).",
+  "measure": "CAGR, max drawdown, MAR (CAGR / |max drawdown|), trades, win rate, per market and period.",
+  "adopt": "Per market. A variant replaces single only if, against single on the site pool, its develop CAGR AND develop MAR are higher, its holdout CAGR AND holdout MAR are at least single's, and its max drawdown is no more than 2 percentage points deeper in either period. For US it must also have holdout and develop MAR at least single's on the point-in-time list. If several pass, the one with the higher develop MAR. Otherwise single stays.",
+  "after": "Anything adopted becomes a setting of new experiments only, and the site then needs a scale-in mechanism (not built yet)."
+}

@@ -12,7 +12,7 @@ import hashlib
 import json
 
 from . import entry, gate, history, reuse, rules, universe
-from .agents import desk_prompts
+from .agents import EVIDENCE_PROMPT, HELD_ADD_PROMPT, desk_prompts
 from .risk import BOUNDS, BREAKEVEN_PCT, TRAIL_ARM
 
 STRATEGY_VERSION = 1       # raise when the strategy's logic changes in a way the fingerprint below cannot see
@@ -30,7 +30,10 @@ CONFIG_KEYS = ('fee_kr', 'fee_us', 'sell_tax_kr', 'slippage_bps', 'min_take_cost
 def fingerprint(config):
     """A short hash of what defines the month strategy. Bug fixes elsewhere leave it alone; a new prompt, rule parameter,
     limit or cost assumption changes it."""
-    parts = {'version': STRATEGY_VERSION, 'prompts': desk_prompts('month'), 'bounds': BOUNDS['month'],
+    # The evidence instructions are added to every role when the experiment reads the packs: they shape decisions as much
+    # as the role prompts (2026-10-08: they were left out, so a change to them went unnoticed).
+    parts = {'version': STRATEGY_VERSION, 'prompts': desk_prompts('month'), 'evidence_prompts': EVIDENCE_PROMPT, 'held_add_prompts': HELD_ADD_PROMPT,
+             'bounds': BOUNDS['month'],
              'trail': [TRAIL_ARM, BREAKEVEN_PCT], 'gate': [gate.REANALYZE_SECONDS, gate.REANALYZE_MOVE_PCT],
              'rules': [rules.MOMENTUM_BARS, rules.Z_MOMENTUM, rules.Z_REVERSION],
              'history': [history.HISTORY_DAYS, history.FETCH_BARS], 'focus': universe.CAPS,
@@ -140,4 +143,5 @@ def judge(state, *, tracking, report, evaluation, config, now):
             'checks': checks, 'strategy_changed': changed, 'version': plan.get('version'),
             'ai_vs_rule': scored.get('ai_vs_rule'), 'exit_mode': plan.get('exit_mode', 'target'),
             'signal_filter': plan.get('signal_filter', 'all'), 'evidence': plan.get('evidence', 'off'), 'scan': plan.get('scan', 'focus'),
-            'exit_profile': plan.get('exit_profile', 'ai'), 'official': plan.get('official')}
+            'exit_profile': plan.get('exit_profile', 'ai'), 'held_review': plan.get('held_review', 'off'), 'official': plan.get('official'),
+            'setting_changes': list(plan.get('setting_changes') or [])}

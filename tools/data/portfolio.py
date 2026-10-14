@@ -29,6 +29,9 @@ BENCH = {'KR': '069500.KS', 'US': 'SPY'}
 RISK, NAME_CAP = .005, .30
 # The site's research filter (app/gate.py RESEARCH_DROPS), keyed by (market, is ETF).
 DROPS = {('KR', False): ('golden_cross', 'momentum', 'breakout'), ('US', False): ('momentum', 'breakout'), ('US', True): ('breakout',)}
+DROPS_V2 = {('KR', False): ('golden_cross', 'momentum', 'breakout')}       # signal_filter=research_v2 (2026-10-07)
+# Scale-in variants (research_plan_scale_in.json): sessions to wait for the second half, and how to trigger it.
+SCALE_DAYS = {'confirm': 10, 'dip': 10, 'time': 5}
 
 
 def load(path, market, params):
@@ -40,7 +43,8 @@ def load(path, market, params):
     tr = np.maximum(adj['high']-adj['low'], np.maximum(abs(adj['high']-adj['close'].shift(1)), abs(adj['low']-adj['close'].shift(1))))
     atr = tr.rolling(14).mean()/adj['close']
     dates = df['date'].astype(str).to_numpy()
-    rules = [r for r in SIGNALS[params['sig']] if r not in DROPS.get((market, path.stem in ETFS), ()) or params.get('filter') != 'research']
+    drops = {'research': DROPS, 'research_v2': DROPS_V2}.get(params.get('filter'), {}).get((market, path.stem in ETFS), ())
+    rules = [r for r in SIGNALS[params['sig']] if r not in drops]
     buy = (sig[rules].any(axis=1).to_numpy() if rules else np.zeros(len(sig), bool)) & regime_masks(dates, market)[params['regime']]
     value = pd.Series(df['close']*df['volume'].fillna(0)).rolling(60).median()
     cols = {'open': adj['open'], 'high': adj['high'], 'low': adj['low'], 'close': adj['close'], 'atr': atr, 'buy': buy, 'value': value}
@@ -63,9 +67,32 @@ def run(market, symbols, params, start, end, allowed=None):
     whole = market == 'KR'
     pending, last, peak, skipped = {}, {}, SEED[market], 0
     limit = params.get('daily_limit')
+    scale = params.get('scale', 'single')
+    adds = set()                         # positions whose second half buys at today's open
     prev_eq = SEED[market]
     for day in days:
         halted = False
+        # 0) second halves decided at yesterday's close (scale-in variants); the stop never moves for them
+        for s in adds:
+            p = pos.get(s)
+            if p is None or day not in data[s].index:
+                continue
+            row = data[s].loc[day]
+            if row['open'] <= p['stop']:
+                continue
+            price = row['open']*(1+k['slip']/1e4)
+            left = p['plan']['full']-p['qty']
+            if scale != 'dip':
+                used = p['qty']*(p['entry']-p['stop'])
+                left = min(left, max(0.0, p['plan']['budget']-used)/(price-p['stop']))
+            left = min(left, cash/(price*(1+k['fee']/1e4)))
+            left = math.floor(left) if whole else math.floor(left*1e4)/1e4
+            if left > 0:
+                cash -= left*price*(1+k['fee']/1e4)
+                p['qty'] += left
+                p['cost'] += left*price
+            p['plan'] = None
+        adds = set()
         if limit and pos:
             open_eq = cash+sum(p['qty']*(data[x].at[day, 'open'] if day in data[x].index else last.get(x, p['entry'])) for x, p in pos.items())
             if open_eq/prev_eq-1 <= -limit:
@@ -93,10 +120,17 @@ def run(market, symbols, params, start, end, allowed=None):
             if qty <= 0:
                 skipped += 1
                 continue
+            plan = None
+            if scale != 'single':
+                half = math.floor(qty/2) if whole else math.floor(qty/2*1e4)/1e4
+                if half > 0:          # a KR size of one share cannot be split: it is bought whole, as the plan says
+                    plan = {'full': qty, 'budget': eq*risk, 'atr': pending[s], 'sp': sp, 'n': 0}
+                    qty = half
             gross = qty*entry
             cash -= gross*(1+k['fee']/1e4)
             pos[s] = {'qty': qty, 'entry': entry, 'stop': entry*(1-sp), 'arm': entry*(1+tp*params['arm']),
-                      'trail': sp*params['trail'], 'high': entry, 'left': int(params['hold']), 'day': day, 'cost': gross}
+                      'trail': sp*params['trail'], 'high': entry, 'left': int(params['hold']), 'day': day, 'cost': gross,
+                      'plan': plan}
         pending = {}
         # 2) exits through today's bar
         for s in list(pos):
@@ -126,6 +160,22 @@ def run(market, symbols, params, start, end, allowed=None):
         for s, d in data.items():
             if day in d.index:
                 last[s] = d.at[day, 'close']
+        for s, p in pos.items():
+            plan = p.get('plan')
+            if not plan or day not in data[s].index:
+                continue
+            plan['n'] += 1
+            close = data[s].at[day, 'close']
+            if scale == 'time':
+                hit = plan['n'] >= SCALE_DAYS['time']
+            elif scale == 'confirm':
+                hit = close >= p['entry']*(1+plan['atr'])
+            else:
+                hit = close <= p['entry']*(1-.5*plan['sp'])
+            if hit:
+                adds.add(s)
+            elif plan['n'] >= SCALE_DAYS[scale]:
+                p['plan'] = None
         if limit and not halted and pos:
             close_eq = cash+sum(p['qty']*last.get(x, p['entry']) for x, p in pos.items())
             if close_eq/prev_eq-1 <= -limit:
@@ -138,6 +188,8 @@ def run(market, symbols, params, start, end, allowed=None):
                  and (month is None or s in month)
                  and data[s].loc[day, 'buy'] and np.isfinite(data[s].loc[day, 'atr'])]
         pending = {} if halted else {s: data[s].loc[day, 'atr'] for _, s in sorted(cands, reverse=True)}
+        if halted:
+            adds = set()
         eq = cash+sum(p['qty']*last.get(x, p['entry']) for x, p in pos.items())
         equity_curve.append((day, eq))
         prev_eq = eq

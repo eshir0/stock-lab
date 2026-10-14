@@ -99,6 +99,19 @@ class DeskMixin:
     def last_evaluation(state, symbol):
         return next((e for e in reversed(state.get('evaluations') or []) if e.get('symbol') == symbol), None)
 
+    @classmethod
+    def last_look(cls, state, symbol):
+        """The record the re-analysis wait is measured from. A conditional entry's fill is recorded without rule signals
+        (they would count twice in the per-rule scoring), so on its own it never matched the rules firing now and the name
+        was analysed again minutes after the fill (2026-10-09: AMD 02:23 -> 02:36, AVGO 03:42 -> 03:57, both HOLD). A fill
+        counts as a look with the rules of the analysis that planned it, at the fill's time and price."""
+        last = cls.last_evaluation(state, symbol)
+        if not last or last.get('selected_by') != 'watch':
+            return last
+        plan = next((e for e in reversed(state.get('evaluations') or []) if e.get('run_id') == last.get('run_id')
+                     and e.get('selected_by') != 'watch'), None)
+        return dict(plan, time=last.get('time'), price=last.get('price')) if plan else last
+
     @staticmethod
     def focus_note(state, symbol):
         """Why today's list holds this name (the morning news read), if it does."""
@@ -170,6 +183,7 @@ class DeskMixin:
             symbol, quote = cand[0], cand[2]
             name = SYMBOLS[symbol]['name']
             held = bool((snapshot['positions'].get(symbol) or {}).get('quantity'))
+            adding = held and self.adds_to_held(snapshot)      # a held name is looked at like a new buy (BUY rules)
             forced = symbol == requested or not enforce
             problem = ''
             try:
@@ -183,20 +197,22 @@ class DeskMixin:
                 signal = signals(rows)
                 ignore = gate.dropped((snapshot.get('strategy_settings') or {}).get('signal_filter', 'all'),
                                       SYMBOLS[symbol]['market'], is_etf(symbol))
-                verdict = gate.assess(held=held, signals=signal, last=self.last_evaluation(snapshot, symbol),
+                verdict = gate.assess(held=held and not adding, signals=signal, last=self.last_look(snapshot, symbol),
                                       price=mid(quote), now=now, forced=forced, ignore=ignore,
                                       sell_signals=not self.scans_pool(snapshot))
             else:
                 verdict = {'eligible': forced, 'reason': 'requested' if symbol == requested else 'no_data', 'rules': []}
                 problem = problem or f'완료된 일봉 {len(rows or [])}개 (필요 {history.MIN_BARS}개)'
-            verdicts[symbol] = dict(verdict, signals=signal, held=held)
+            verdicts[symbol] = dict(verdict, signals=signal, held=held, adding=adding)
+            shown = {'signal': 'add', 'no_signal': 'held_quiet'}.get(verdict['reason'], verdict['reason']) if adding else verdict['reason']
             if rows is not None and len(rows) >= history.MIN_BARS:
                 try:
-                    verdicts[symbol]['board'] = board(rows, held, ignore, sells_off=held and self.scans_pool(snapshot))
+                    quiet = held and not adding
+                    verdicts[symbol]['board'] = board(rows, quiet, ignore, sells_off=quiet and self.scans_pool(snapshot))
                 except (KeyError, TypeError, ValueError, ZeroDivisionError):
                     pass                     # the board is a display aid; the gate decision above stands
             checks.append({'symbol': symbol, 'name': name, 'held': held, 'eligible': verdict['eligible'],
-                           'reason': verdict['reason'], 'rules': verdict['rules'], 'filtered': verdict.get('filtered', []),
+                           'reason': shown, 'rules': verdict['rules'], 'filtered': verdict.get('filtered', []),
                            'signals': {k: v for k, v in signal.items() if v}, **({'detail': problem} if problem else {}),
                            **({'board': verdicts[symbol]['board']} if 'board' in verdicts[symbol] else {})})
             if verdict['eligible']:
@@ -245,10 +261,26 @@ class DeskMixin:
         verdict = verdict or {}
         return {'daily_history': history.block(bars or []),
                 'rule_signals': dict(verdict.get('signals') or {}),
-                'rule_triggers': {'side': 'SELL' if verdict.get('held') else 'BUY', 'why': verdict.get('reason'),
-                                  'rules': [RULE_NAMES.get(r, r) for r in verdict.get('rules') or []]},
+                'rule_triggers': {'side': 'SELL' if verdict.get('held') and not verdict.get('adding') else 'BUY',
+                                  'why': verdict.get('reason'), 'rules': [RULE_NAMES.get(r, r) for r in verdict.get('rules') or []]},
                 'own_history': history.own_records(account, symbol, now),
-                'focus': self.focus_note(account, symbol)}
+                'focus': self.focus_note(account, symbol),
+                **({'add_review': True, 'position_weight_pct': self.position_weight(account, symbol)} if verdict.get('adding') else {})}
+
+    @staticmethod
+    def position_weight(state, symbol):
+        """This name's share of its currency's account at the last quotes, in percent (None without a quote)."""
+        currency = SYMBOLS[symbol]['currency']
+        quotes, total, mine = state.get('quotes') or {}, float((state.get('cash') or {}).get(currency, 0)), None
+        for held, pos in (state.get('positions') or {}).items():
+            if SYMBOLS[held]['currency'] != currency:
+                continue
+            price = (quotes.get(held) or {}).get('last') or pos.get('average')
+            value = float(price or 0)*float(pos.get('quantity') or 0)
+            total += value
+            if held == symbol:
+                mine = value
+        return round(mine/total*100, 2) if mine is not None and total > 0 else None
 
     @staticmethod
     def trail(pos, quote):
@@ -615,7 +647,7 @@ class DeskMixin:
         when the analysis was not started by a rule."""
         if not verdict or verdict.get('reason') != 'signal':
             return None
-        return 'SELL' if verdict.get('held') else 'BUY'
+        return 'SELL' if verdict.get('held') and not verdict.get('adding') else 'BUY'
 
     @staticmethod
     def previous_note(state, symbol, now, quote):
@@ -645,11 +677,13 @@ class DeskMixin:
     def final_quote(self, symbol, decision):
         """The quote a finished analysis acts on. A short Toss rate-limit pause used to throw away a whole analysis at this
         last step (2026-10-06 10:41): it is retried, and a decision that places no order (HOLD) may be recorded on the
-        poll's own quote from the last minute instead. An order never goes out on anything but a fresh quote."""
+        poll's own quote from the last minute instead. An order never goes out on anything but a fresh quote. A book that
+        is empty or crossed for a moment (validate_quote's "waiting for a valid quote") is treated the same way: on
+        2026-10-08 11:37 one such instant threw away a finished 7-minute analysis of 삼성바이오로직스."""
         for attempt in range(self.FINAL_QUOTE_TRIES):
             try:
                 return self.quote_for_trade(symbol)
-            except ProviderError:
+            except (ProviderError, ValueError):            # ValueError: RuleError from validate_quote
                 if decision.get('stance') == 'HOLD':
                     polled = (self.store.read().get('quotes') or {}).get(symbol)
                     if polled and time.time()-polled.get('received', 0) <= self.RECORD_QUOTE_AGE:
@@ -1096,6 +1130,15 @@ class DeskMixin:
                 trigger_side=self.trigger_side(verdicts.get(symbol)) if month else None, evidence=evidence_note,
                 cost_bps=self.trade_cost_bps(symbol, fresh))
             self.plan_entry(s, symbol, decision, fresh, run, gen, time.time())
+            if decision['stance'] == 'SELL' and (verdicts.get(symbol) or {}).get('adding') \
+                    and (verdicts.get(symbol) or {}).get('reason') != 'requested':
+                # An add-on review never sells: exits stay with the stop, trailing stop and holding limit (the 2026-10-06
+                # research found selling on the AI's word worse). The verdict is kept in the record and scored.
+                if scorecard:
+                    scorecard['action'] = 'not_acted'
+                event(s, SYMBOLS[symbol]['name']+' · 추가 매수 검토에서 매도 의견이 나왔지만, 보유 종목 매도는 손절·추적 손절·기한이 '
+                         '담당해 주문하지 않습니다.')
+                return
             if decision['stance'] == 'HOLD' or s['revision'] != rev:
                 if decision['stance'] != 'HOLD':
                     why = '분석 중 계좌가 바뀌어(다른 체결·설정 변경) 이 판단으로는 주문하지 않습니다.'

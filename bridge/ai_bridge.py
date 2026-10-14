@@ -534,26 +534,48 @@ def _get_json(url, headers):
         return json.loads(r.read())
 
 
-_direct = {}           # provider -> {'ok_at', 'failed_at', 'error'}: whether the direct usage read still works
+_direct = {}           # provider -> {'ok_at', 'failed_at', 'error', 'state'}: whether the direct usage read still works
+# state: 'ok'; 'expired' (the CLI's login token is past its expiry or the endpoint answered 401); 'no_login' (no login
+# file for that CLI on this host); 'error' (anything else: changed address or shape, server error, network).
 
 
-def _direct_result(provider, error=None):
+def _direct_result(provider, error=None, state=None):
     with _cooldown_lock:
         entry = _direct.setdefault(provider, {})
         if error is None:
-            entry.update(ok_at=time.time(), error='')
+            entry.update(ok_at=time.time(), error='', state='ok')
         else:
-            entry.update(failed_at=time.time(), error=error)
+            entry.update(failed_at=time.time(), error=error, state=state or 'error')
+
+
+def _failure(exc):
+    """(error text, state) for a failed direct read: a 401 means the login token was refused."""
+    if isinstance(exc, urllib.error.HTTPError) and exc.code == 401:
+        return 'HTTP 401', 'expired'
+    if isinstance(exc, urllib.error.HTTPError):
+        return f'HTTP {exc.code}', 'error'
+    return type(exc).__name__, 'error'
+
+
+class _Skip(Exception):
+    """No request this round: the outcome is already recorded."""
 
 
 def read_direct(home=os.path.expanduser('~')):
     """{provider: reading} for the providers whose usage could be read right now. Each provider's last success and last
     failure are kept (`_direct`) and served with /usage, so the dashboard can say when the read stopped working: the
     endpoints are undocumented and may change."""
+    # The tokens are only read, never refreshed: the CLIs refresh their own logins when they run (every analysis runs one),
+    # and a second refresher would log the first one out (2026-10-09).
     out = {}
     try:
-        with open(os.path.join(os.environ.get('CODEX_HOME') or os.path.join(home, '.codex'), 'auth.json'), encoding='utf-8') as f:
-            tokens = json.load(f).get('tokens') or {}
+        try:
+            with open(os.path.join(os.environ.get('CODEX_HOME') or os.path.join(home, '.codex'), 'auth.json'), encoding='utf-8') as f:
+                tokens = json.load(f).get('tokens') or {}
+            tokens['access_token']
+        except (FileNotFoundError, KeyError):
+            _direct_result('codex', 'no login', 'no_login')
+            raise _Skip
         headers = {'Authorization': 'Bearer '+tokens['access_token'], 'Accept': 'application/json', 'User-Agent': 'codex-cli'}
         if tokens.get('account_id'):
             headers['ChatGPT-Account-Id'] = tokens['account_id']
@@ -561,18 +583,32 @@ def read_direct(home=os.path.expanduser('~')):
         if reading:
             out['codex'] = reading
         _direct_result('codex', None if reading else 'unreadable answer')
+    except _Skip:
+        pass
     except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError) as exc:
-        _direct_result('codex', type(exc).__name__)
+        _direct_result('codex', *_failure(exc))
     try:
-        with open(os.path.join(home, '.claude', '.credentials.json'), encoding='utf-8') as f:
-            token = json.load(f)['claudeAiOauth']['accessToken']
+        try:
+            with open(os.path.join(home, '.claude', '.credentials.json'), encoding='utf-8') as f:
+                login = json.load(f)['claudeAiOauth']
+            token = login['accessToken']
+        except (FileNotFoundError, KeyError):
+            _direct_result('claude', 'no login', 'no_login')
+            raise _Skip
+        expires = login.get('expiresAt')
+        if isinstance(expires, (int, float)) and expires/1000 <= time.time():
+            # Past its expiry: asking would only earn a 401. Claude Code renews it the next time it runs on this host.
+            _direct_result('claude', 'token expired', 'expired')
+            raise _Skip
         reading = claude_reading(_get_json(CLAUDE_USAGE_URL, {'Authorization': 'Bearer '+token,
                                                               'anthropic-beta': 'oauth-2025-04-20', 'Accept': 'application/json'}))
         if reading:
             out['claude'] = reading
         _direct_result('claude', None if reading else 'unreadable answer')
+    except _Skip:
+        pass
     except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError) as exc:
-        _direct_result('claude', type(exc).__name__)
+        _direct_result('claude', *_failure(exc))
     return out
 
 

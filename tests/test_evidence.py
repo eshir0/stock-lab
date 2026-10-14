@@ -231,3 +231,16 @@ def test_research_v2_keeps_every_us_signal_and_the_korean_drops():
     assert gate.dropped('research_v2', 'US', False) == set() and gate.dropped('research_v2', 'US', True) == set()
     assert gate.dropped('research_v2', 'KR', False) == {'golden_cross', 'momentum', 'breakout'}
     assert gate.dropped('research', 'US', False) == {'momentum', 'breakout'}               # saved experiments unchanged
+
+
+def test_debt_and_per_reach_the_selector_and_the_analysts(tmp_path):
+    # 2026-10-08: the packs carry balance (debt-to-equity) and valuation (PER on trailing EPS vs the name's past year-end PER).
+    fundamentals = {'balance': {'debt_to_equity_pct': 71.4},
+                    'valuation': {'per_ttm': 29.5, 'per_history_median': 35.2, 'per_vs_history_median_pct': -16.2, 'loss_making': False}}
+    p = dict(pack(), fundamentals=fundamentals)
+    b = evidence.brief(p, ['momentum'])
+    assert b['valuation'] == {'per_ttm': 29.5, 'per_history_median': 35.2, 'per_vs_history_median_pct': -16.2, 'loss_making': False}
+    assert b['debt_to_equity_pct'] == 71.4
+    assert evidence.brief(pack(), ['momentum'])['valuation']['per_ttm'] is None          # ETFs and names without filings
+    prompt = agents.with_evidence('x', 'fundamental', {'evidence': {'available': True}})
+    assert '부채비율' in prompt and 'PER' in prompt

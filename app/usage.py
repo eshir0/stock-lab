@@ -35,6 +35,14 @@ def window_pct(window, now):
 
 
 DIRECT_STALE = 600           # the direct read runs every 2 minutes: ten minutes without a success is a failure worth showing
+OLD_READING = 30*60          # a usage reading older than this is shown as an old record
+# Why the direct read stopped, as the bridge classifies it (2026-10-09). The bridge only reads the CLIs' login tokens; the
+# CLIs renew them whenever they run (each analysis runs one), so an expired token mostly means no analysis for ~8 hours.
+LOGIN_NOTES = {
+    ('claude', 'expired'): 'Claude: 로그인 만료 — 사용량 표시가 멈췄습니다. 다음 Claude 분석이나 이 서버에서 Claude Code를 한 번 실행하면 다시 받아옵니다',
+    ('claude', 'no_login'): 'Claude: 이 서버에 Claude Code 로그인이 없습니다',
+    ('codex', 'expired'): 'Codex: 로그인 만료 — 사용량 표시가 멈췄습니다. 다음 Codex 분석이나 이 서버에서 codex를 한 번 실행하면 다시 받아옵니다',
+    ('codex', 'no_login'): 'Codex: 이 서버에 Codex 로그인이 없습니다'}
 
 
 class UsageGate:
@@ -63,7 +71,7 @@ class UsageGate:
             data = dict(self.cache[1]) if self.cache else {}
             entry = dict(data.get(provider) or {})
             if isinstance(limits, dict) and limits.get('windows'):
-                entry['limits'] = limits
+                entry['limits'] = dict(limits, at=self.clock())
             if isinstance(cooldown_until, (int, float)) and cooldown_until > self.clock():
                 entry['cooldown_until'] = cooldown_until
             data[provider] = entry
@@ -76,12 +84,23 @@ class UsageGate:
         result = {'name': provider, 'label': LABELS.get(provider, provider), 'state': 'ok', 'pct': None,
                   'windows': {}, 'until': None, 'note': ''}
         direct = entry.get('direct') or {}
-        if direct.get('enabled') and direct.get('failed_at') and now-(direct.get('ok_at') or 0) > DIRECT_STALE:
-            # The bridge reads the usage straight from the account every 2 minutes; when that keeps failing (undocumented
-            # endpoints can change) the numbers below only come from call answers and the 3-hourly check.
+        failing = direct.get('enabled') and direct.get('failed_at') and (direct.get('failed_at') or 0) >= (direct.get('ok_at') or 0)
+        login = LOGIN_NOTES.get((provider, direct.get('state'))) if failing else None
+        if login:
+            # An expired or missing login is said at once, in words that say how to get the numbers back.
+            result['login_note'] = login
+        elif failing and now-(direct.get('ok_at') or 0) > DIRECT_STALE:
+            # Any other failure (undocumented endpoints can change) after ten minutes: the numbers below then only come
+            # from call answers and the 3-hourly check.
             since = direct.get('ok_at')
+            result['login_note'] = f'{LABELS.get(provider, provider)}: 사용량을 읽지 못했습니다'
             result['direct_note'] = ('사용량 직접 읽기 실패' + (f'({int((now-since)//60)}분째)' if since else '')
                                      + ' · 호출 응답으로만 추정')
+        read_at = (entry.get('limits') or {}).get('at')
+        if isinstance(read_at, (int, float)):
+            result['read_at'] = read_at
+            if now-read_at > OLD_READING:
+                result['old'] = True
         cooldown = entry.get('cooldown_until')
         if isinstance(cooldown, (int, float)) and cooldown > now:
             return dict(result, state='exhausted', until=cooldown, note=f'사용량 소진 · {clock_text(cooldown)}까지')

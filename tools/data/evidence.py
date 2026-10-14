@@ -13,8 +13,10 @@ now, as facts the analysts must cite. Everything uses only information known at 
   its 200-day average): forward 21-session returns.
 - regime: index vs its 50/200-day averages, VIX level and its 1-year percentile, US 10-year yield, USD/KRW, dollar index.
 - fundamentals: US from SEC XBRL (last quarters' revenue, operating income, net income, diluted EPS with filing dates, YoY,
-  next report estimated from the last 10-Q/10-K + ~91 days); KR from DART (latest statements: revenue, operating income,
-  net income with the year-ago quarter, filing date) and the last 30 days of disclosure titles. ETFs: none.
+  the fourth quarter derived from the year, next report estimated from the last 10-Q/10-K + ~91 days); KR from DART (latest
+  statements: revenue, operating income, net income with the year-ago quarter, filing date) and the last 30 days of
+  disclosure titles. Both: balance (liabilities, equity, debt-to-equity) and valuation (PER on trailing-four-quarter EPS,
+  split-adjusted, and PER at the last fiscal year ends). ETFs: none.
 
 Usage: evidence.py   (needs /app mounted read-only for the site's catalogue)
 """
@@ -23,7 +25,7 @@ import math
 import os
 import sys
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import duckdb
@@ -187,30 +189,152 @@ def own(df, market, etf):
 
 US_TAGS = {'revenue': ('RevenueFromContractWithCustomerExcludingAssessedTax', 'Revenues', 'SalesRevenueNet'),
            'operating_income': ('OperatingIncomeLoss',), 'net_income': ('NetIncomeLoss',), 'eps_diluted': ('EarningsPerShareDiluted',)}
+US_BALANCE = ('Liabilities', 'StockholdersEquity', 'StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest',
+              'LiabilitiesAndStockholdersEquity')
+DEBT_NOTE = ('부채비율 = 부채총계 ÷ 자본총계 × 100. 은행·보험·증권사는 예금·보험계약이 부채라 구조적으로 높습니다. '
+             '자본이 0 이하(자본잠식)면 비율 대신 equity가 음수로 남습니다.')
+PER_NOTE = ('PER = 마지막 완성 일봉 종가 ÷ 최근 4분기 주당순이익(분할 반영). 적자면 PER 없음. per_history는 각 회계연도 말 종가 ÷ '
+            '그 해 주당순이익으로, 그 해 실적이 공개되기 전 값이라 당시 투자자가 본 PER과 다릅니다. 성장 기업은 PER이 늘 높을 수 있어 '
+            '과거 자기 수준과 비교하세요. 이익이 0에 가까우면(적자에서 막 벗어난 해 등) PER이 수백 배로 커져 비교 의미가 약합니다.')
 
 
-def us_fundamentals(con, cik):
+def split_events(path):
+    """Every split in the archive's Yahoo events for this price file: [(ex date 'YYYY-MM-DD' UTC, ratio new/old)]."""
+    epath = path.parent/'events'/f'{path.stem}.json'
+    try:
+        items = (json.loads(epath.read_text()).get('splits') or {}).values()
+    except (OSError, ValueError):
+        return []
+    out = []
+    for x in items:
+        try:
+            ratio = float(x['numerator'])/float(x['denominator'])
+            when = datetime.fromtimestamp(int(x['date']), timezone.utc).date().isoformat()
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            continue
+        if ratio > 0 and abs(ratio-1) > .01:
+            out.append((when, ratio))
+    return sorted(out)
+
+
+def split_factor(events, filed):
+    """Shares per share-at-filing: a per-share number published on `filed` is divided by this to match today's (split-
+    adjusted) prices. A number restated after the split was filed after it and needs nothing."""
+    f = 1.0
+    for when, ratio in events:
+        if when > str(filed)[:10]:
+            f *= ratio
+    return f
+
+
+def close_on(closes, day):
+    """Last completed close on or before `day` (closes: Series indexed by 'YYYY-MM-DD', split-adjusted)."""
+    hit = closes[closes.index <= str(day)[:10]]
+    return float(hit.iloc[-1]) if len(hit) else None
+
+
+def quarters(rows):
+    """Quarterly values from SEC duration facts (start, end, val, filed; one row per period, latest filing kept). 10-Ks give
+    the fourth quarter only as the year, so it is derived: the year minus the 9-month year-to-date (or minus the year's three
+    quarters). -> [{'end', 'value', 'filed', 'derived'}] oldest first."""
+    rows = rows.copy()
+    rows['days'] = (pd.to_datetime(rows['end'])-pd.to_datetime(rows['start'])).dt.days
+    out = {str(x['end']): {'end': str(x['end']), 'value': float(x['val']), 'filed': str(x['filed']), 'derived': False}
+           for _, x in rows[(rows['days'] >= 80) & (rows['days'] <= 100)].iterrows()}
+    for _, a in rows[(rows['days'] >= 350) & (rows['days'] <= 380)].iterrows():
+        end = str(a['end'])
+        if end in out:
+            continue
+        ytd = rows[(rows['start'] == a['start']) & (rows['days'] >= 260) & (rows['days'] <= 290)]
+        if len(ytd):
+            rest = float(ytd.iloc[-1]['val'])
+        else:
+            inside = [q for q in out.values() if str(a['start']) < q['end'] < end]
+            if len(inside) != 3:
+                continue
+            rest = sum(q['value'] for q in inside)
+        out[end] = {'end': end, 'value': float(a['val'])-rest, 'filed': str(a['filed']), 'derived': True}
+    return [out[k] for k in sorted(out)]
+
+
+def ttm(qs):
+    """Sum of the last four quarters when they are consecutive (about a year from the first to the last end), else None."""
+    if len(qs) < 4:
+        return None
+    last = qs[-4:]
+    span = (pd.Timestamp(last[-1]['end'])-pd.Timestamp(last[0]['end'])).days
+    return sum(q['value'] for q in last) if 250 <= span <= 300 else None
+
+
+def debt(liabilities, equity, as_of, filed):
+    if liabilities is None or equity is None:
+        return None
+    return {'as_of': as_of, 'filed': filed, 'liabilities': r(liabilities, 0), 'equity': r(equity, 0),
+            'debt_to_equity_pct': r(liabilities/equity*100, 1) if equity > 0 else None, 'note': DEBT_NOTE}
+
+
+def valuation(price, eps_ttm, basis, history):
+    """PER now and at past fiscal year ends; history: [{'year_end', 'eps', 'close'}] (split-adjusted)."""
+    if price is None or eps_ttm is None:
+        return None
+    past = [{**h, 'eps': r(h['eps'], 4), 'close': r(h['close'], 4),
+             'per': r(h['close']/h['eps'], 1) if h['eps'] > 0 and h['close'] else None} for h in history]
+    pers = sorted(h['per'] for h in past if h['per'] is not None)
+    per = r(price/eps_ttm, 1) if eps_ttm > 0 else None
+    median = r(float(np.median(pers)), 1) if pers else None
+    return {'price': r(price, 4), 'eps_ttm': r(eps_ttm, 4), 'eps_basis': basis, 'per_ttm': per,
+            'loss_making': eps_ttm <= 0, 'per_history': past, 'per_history_median': median,
+            'per_vs_history_median_pct': r((per/median-1)*100, 1) if per and median else None, 'note': PER_NOTE}
+
+
+def us_fundamentals(con, cik, closes=None, events=()):
     tags = sorted({t for ts in US_TAGS.values() for t in ts})
-    q = con.execute("select tag, start, \"end\", val, form, filed from read_parquet(?) where cik = ? and tag in ("
+    q = con.execute("select tag, start, \"end\", val, form, filed, accn from read_parquet(?) where cik = ? and tag in ("
                     + ','.join('?'*len(tags)) + ") and form in ('10-Q','10-K','10-Q/A','10-K/A')",
                     [str(DATA/'sec'/'facts'/'*.parquet'), cik, *tags]).df()
     if q.empty:
         return None
-    q = q.dropna(subset=['start', 'end'])
-    q['days'] = (pd.to_datetime(q['end'])-pd.to_datetime(q['start'])).dt.days
-    q = q[(q['days'] >= 80) & (q['days'] <= 100)].sort_values('filed').drop_duplicates(['tag', 'end'], keep='last')
-    out = {}
+    q = q.dropna(subset=['start', 'end']).sort_values('filed').drop_duplicates(['tag', 'start', 'end'], keep='last')
+    out, eps_q, eps_rows = {}, None, None
     for key, choices in US_TAGS.items():
-        rows = next((q[q['tag'] == t] for t in choices if (q['tag'] == t).any()), None)
-        if rows is None or rows.empty:
+        # Companies switch tags over the years (NVDA's revenue tag stopped in 2020): use the one with the newest period.
+        present = [q[q['tag'] == t] for t in choices if (q['tag'] == t).any()]
+        if not present:
             continue
-        rows = rows.sort_values('end')
-        last = rows.iloc[-1]
-        end = pd.to_datetime(last['end'])
-        prior = rows[(pd.to_datetime(rows['end']) - (end-timedelta(days=365))).abs() <= timedelta(days=20)]
-        yoy = (last['val']/prior.iloc[-1]['val']-1)*100 if len(prior) and prior.iloc[-1]['val'] not in (0, None) and prior.iloc[-1]['val'] > 0 else None
-        out[key] = {'quarters': [{'end': x['end'], 'value': r(x['val'], 4), 'filed': x['filed']} for _, x in rows.tail(4).iterrows()],
+        rows = max(present, key=lambda x: str(x['end'].max()))
+        if key == 'eps_diluted':
+            # Per-share numbers filed before a later split are put on today's share count, like the archive's prices.
+            rows = rows.assign(val=[v/split_factor(events, f) for v, f in zip(rows['val'], rows['filed'])])
+            eps_rows = rows
+        qs = quarters(rows)
+        if not qs:
+            continue
+        if key == 'eps_diluted':
+            eps_q = qs
+        last = qs[-1]
+        end = pd.Timestamp(last['end'])
+        prior = [x for x in qs if abs((pd.Timestamp(x['end'])-(end-timedelta(days=365))).days) <= 20]
+        yoy = (last['value']/prior[-1]['value']-1)*100 if prior and prior[-1]['value'] > 0 else None
+        out[key] = {'quarters': [{'end': x['end'], 'value': r(x['value'], 4), 'filed': x['filed'],
+                                  **({'derived': '연간 − 1~3분기 누적'} if x['derived'] else {})} for x in qs[-4:]],
                     'latest_yoy_pct': r(yoy)}
+    b = con.execute("select tag, \"end\", val, filed from read_parquet(?) where cik = ? and start is null and tag in ("
+                    + ','.join('?'*len(US_BALANCE)) + ") and form in ('10-Q','10-K','10-Q/A','10-K/A')",
+                    [str(DATA/'sec'/'facts'/'*.parquet'), cik, *US_BALANCE]).df()
+    if not b.empty:
+        b = b.sort_values('filed').drop_duplicates(['tag', 'end'], keep='last')
+        end = b['end'].max()
+        at = {t: float(v) for t, v in zip(b[b['end'] == end]['tag'], b[b['end'] == end]['val'])}
+        equity = at.get('StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest', at.get('StockholdersEquity'))
+        liabilities = at.get('Liabilities')
+        if liabilities is None and equity is not None and 'LiabilitiesAndStockholdersEquity' in at:
+            liabilities = at['LiabilitiesAndStockholdersEquity']-equity
+        out['balance'] = debt(liabilities, equity, str(end), str(b[b['end'] == end]['filed'].max()))
+    if eps_q and closes is not None and len(closes):
+        years = eps_rows.assign(days=(pd.to_datetime(eps_rows['end'])-pd.to_datetime(eps_rows['start'])).dt.days)
+        years = years[(years['days'] >= 350) & (years['days'] <= 380)].sort_values('end').tail(5)
+        history = [{'year_end': str(y['end']), 'eps': float(y['val']), 'close': close_on(closes, y['end'])} for _, y in years.iterrows()]
+        out['valuation'] = valuation(float(closes.iloc[-1]), ttm(eps_q), '최근 4분기 희석 주당순이익 합(SEC)', history)
     filings = con.execute("select form, filed from read_parquet(?) where cik = ? and form in ('10-Q','10-K') order by filed desc limit 1",
                           [str(DATA/'sec'/'filings'/'*.parquet'), cik]).fetchall()
     if filings:
@@ -222,7 +346,9 @@ def us_fundamentals(con, cik):
 
 
 KR_ACCOUNTS = {'revenue': ('ifrs-full_Revenue',), 'operating_income': ('dart_OperatingIncomeLoss',), 'net_income': ('ifrs-full_ProfitLoss',)}
+KR_EPS = 'ifrs-full_BasicEarningsLossPerShare'
 REPORT_NAMES = {'11011': '사업보고서', '11012': '반기보고서', '11013': '1분기보고서', '11014': '3분기보고서'}
+PERIOD_END = {'11013': '03-31', '11012': '06-30', '11014': '09-30', '11011': '12-31'}
 
 
 def num(x):
@@ -232,7 +358,33 @@ def num(x):
         return None
 
 
-def kr_fundamentals(con, code):
+KR_EPS_PARTS = ('ifrs-full_BasicEarningsLossPerShareFromContinuingOperations',
+                'ifrs-full_BasicEarningsLossPerShareFromDiscontinuedOperations')
+EPS_COLUMNS = ('thstrm_amount', 'thstrm_add_amount', 'frmtrm_add_amount', 'frmtrm_q_amount')
+
+
+def kr_eps_rows(con, slot, code):
+    """The basic EPS row of one report, or - for a company that reports only continuing and discontinued operations (삼성
+    바이오로직스 after its 2025 split-off) - their sum."""
+    path = DATA/'dart'/'fin'/slot
+    if not path.exists():
+        return None
+    rows = con.execute("select * from read_parquet(?) where stock_code = ? and account_id in (?, ?, ?)",
+                       [str(path/'*.parquet'), code, KR_EPS, *KR_EPS_PARTS]).df()
+    whole = rows[rows['account_id'] == KR_EPS]
+    if len(whole):
+        return whole.iloc[0]
+    parts = [rows[rows['account_id'] == a] for a in KR_EPS_PARTS]
+    if parts[0].empty:
+        return None
+    combined = parts[0].iloc[0].copy()
+    for col in EPS_COLUMNS:
+        if col in combined.index and num(combined[col]) is not None:
+            combined[col] = num(combined[col])+sum(num(p.iloc[0].get(col)) or 0 for p in parts[1:] if len(p))
+    return combined
+
+
+def kr_fundamentals(con, code, closes=None, events=()):
     # Newest reporting period first: within a year annual (Dec) > Q3 (Sep) > half (Jun) > Q1 (Mar). A plain string sort put
     # the Q1 report (11013) ahead of the half-year report (11012).
     period = {'11013': 1, '11012': 2, '11014': 3, '11011': 4}
@@ -240,15 +392,16 @@ def kr_fundamentals(con, code):
     slots = sorted((s for s in folders if s.split('_')[1] in period), key=lambda s: (int(s.split('_')[0]), period[s.split('_')[1]]), reverse=True)
     out = {'source': 'DART 오픈API (접수번호 앞 8자리 = 공시일)'}
     for slot in slots:
-        rows = con.execute("select * from read_parquet(?) where stock_code = ? and sj_div in ('IS','CIS')",
+        rows = con.execute("select * from read_parquet(?) where stock_code = ? and sj_div in ('IS','CIS','BS')",
                            [str(DATA/'dart'/'fin'/slot/'*.parquet'), code]).df()
-        if rows.empty:
+        if rows[rows['sj_div'].isin(['IS', 'CIS'])].empty:
             continue
         year, report = slot.split('_')
-        out['report'] = {'year': year, 'kind': REPORT_NAMES.get(report, report), 'filed': str(rows['rcept_no'].iloc[0])[:8],
+        filed = str(rows['rcept_no'].iloc[0])[:8]
+        out['report'] = {'year': year, 'kind': REPORT_NAMES.get(report, report), 'filed': filed,
                          'statement': '연결' if rows['fs_div'].iloc[0] == 'CFS' else '별도'}
         for key, ids in KR_ACCOUNTS.items():
-            hit = rows[rows['account_id'].isin(ids)]
+            hit = rows[rows['account_id'].isin(ids) & rows['sj_div'].isin(['IS', 'CIS'])]
             if hit.empty:
                 continue
             x = hit.iloc[0]
@@ -256,6 +409,12 @@ def kr_fundamentals(con, code):
             out[key] = {'this_period': this, 'year_ago_period': prior,
                         'yoy_pct': r((this/prior-1)*100) if this is not None and prior and prior > 0 else None,
                         'cumulative': num(x.get('thstrm_add_amount'))}
+        sheet = rows[rows['sj_div'] == 'BS']
+        pick = lambda ident: next((num(v) for v in sheet[sheet['account_id'] == ident]['thstrm_amount']), None)
+        out['balance'] = debt(pick('ifrs-full_Liabilities'), pick('ifrs-full_Equity'), f'{year}-{PERIOD_END[report]}',
+                              f'{filed[:4]}-{filed[4:6]}-{filed[6:]}')
+        if closes is not None and len(closes):
+            out['valuation'] = kr_valuation(con, code, slots, year, report, closes, events)
         break
     since = (date.today()-timedelta(days=30)).strftime('%Y%m%d')
     if (DATA/'dart'/'list').exists():
@@ -263,6 +422,31 @@ def kr_fundamentals(con, code):
                              [str(DATA/'dart'/'list'/'*.parquet'), code, since]).fetchall()
         out['disclosures_30d'] = [{'date': d, 'title': str(t).strip()} for d, t in recent]
     return out if len(out) > 1 else None
+
+
+def kr_valuation(con, code, slots, year, report, closes, events):
+    """TTM basic EPS: the last annual figure, plus this year's cumulative, minus last year's same-period cumulative."""
+    def adjusted(row, key):
+        value = num(row.get(key))
+        return None if value is None else value/split_factor(events, f"{str(row['rcept_no'])[:4]}-{str(row['rcept_no'])[4:6]}-{str(row['rcept_no'])[6:8]}")
+    now = kr_eps_rows(con, f'{year}_{report}', code)
+    if now is None:
+        return None
+    if report == '11011':
+        eps = adjusted(now, 'thstrm_amount')
+    else:
+        annual = kr_eps_rows(con, f'{int(year)-1}_11011', code)
+        this = adjusted(now, 'thstrm_add_amount') if num(now.get('thstrm_add_amount')) is not None else adjusted(now, 'thstrm_amount')
+        before = adjusted(now, 'frmtrm_add_amount') if num(now.get('frmtrm_add_amount')) is not None else adjusted(now, 'frmtrm_q_amount')
+        last_year = adjusted(annual, 'thstrm_amount') if annual is not None else None
+        eps = last_year+this-before if None not in (last_year, this, before) else None
+    history = []
+    for slot in sorted(s for s in slots if s.endswith('_11011'))[-5:]:
+        row = kr_eps_rows(con, slot, code)
+        y = slot.split('_')[0]
+        if row is not None and adjusted(row, 'thstrm_amount') is not None:
+            history.append({'year_end': f'{y}-12-31', 'eps': adjusted(row, 'thstrm_amount'), 'close': close_on(closes, f'{y}-12-31')})
+    return valuation(float(closes.iloc[-1]), eps, '직전 사업연도 기본 주당순이익 + 올해 누적 − 작년 같은 기간 누적(DART)', history)
 
 
 def dividends(path, market):
@@ -342,10 +526,12 @@ def main():
                 'group_base_rates': group_rates(research, market, etf, us_long), 'own_history': history['rules'],
                 'analogs': history.get('analogs'), 'regime': regimes[market], 'dividends': dividends(path, market), 'splits': splits(path, market)}
         try:
+            prices = pd.read_parquet(path)[['date', 'close']].dropna()
+            closes = prices.assign(date=prices['date'].astype(str)).set_index('date')['close'].sort_index()
             if not etf and market == 'US' and symbol in tickers:
-                pack['fundamentals'] = us_fundamentals(con, int(tickers[symbol]))
+                pack['fundamentals'] = us_fundamentals(con, int(tickers[symbol]), closes, split_events(path))
             elif not etf and market == 'KR':
-                pack['fundamentals'] = kr_fundamentals(con, symbol)
+                pack['fundamentals'] = kr_fundamentals(con, symbol, closes, split_events(path))
         except Exception as exc:
             pack['fundamentals_error'] = f'{type(exc).__name__}: {exc}'[:200]
         # Prices that stopped updating make a pack the app must not take as current (the app checks the date too).
